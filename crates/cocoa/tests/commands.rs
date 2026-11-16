@@ -80,7 +80,8 @@ fn cli_exposes_only_the_requested_root_flags() -> Result<(), Box<dyn Error>> {
         .stdin(Stdio::null())
         .output_bounded()?;
     assert!(output.status.success());
-    let help = String::from_utf8(output.stderr)?;
+    assert!(output.stderr.is_empty());
+    let help = String::from_utf8(output.stdout)?;
     for expected in [
         "login",
         "logout",
@@ -114,6 +115,18 @@ fn cli_exposes_only_the_requested_root_flags() -> Result<(), Box<dyn Error>> {
     ] {
         assert!(!help.contains(removed), "{help}");
     }
+    let output = Command::new(env!("CARGO_BIN_EXE_cocoa"))
+        .env_clear()
+        .env("HOME", home.path())
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output_bounded()?;
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        concat!("cocoa ", env!("CARGO_PKG_VERSION"), "\n")
+    );
     for flag in [
         "--preset",
         "--prompt",
@@ -884,8 +897,8 @@ fn session_listing_rejects_invalid_arguments_without_opening_storage() -> Result
         .stdin(Stdio::null())
         .output_bounded()?;
     assert!(output.status.success());
-    assert!(output.stdout.is_empty());
-    let help = String::from_utf8(output.stderr)?;
+    assert!(output.stderr.is_empty());
+    let help = String::from_utf8(output.stdout)?;
     for flag in ["--all", "--before", "--json", "--limit", "--data-dir"] {
         assert!(help.contains(flag), "{help}");
     }

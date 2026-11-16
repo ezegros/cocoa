@@ -842,7 +842,7 @@ pub fn arguments() -> Result<Option<Arguments>, ConfigError> {
                 clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
             ) =>
         {
-            eprint!("{error}");
+            print!("{error}");
             return Ok(None);
         }
         Err(_) => return Err(ConfigError::Arguments),
