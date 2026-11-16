@@ -51,11 +51,8 @@ fn installs_each_platform_and_replaces_only_the_executable() -> Result<(), Box<d
             retained, "previous executable",
             "replace by rename, not truncation"
         );
-        assert_eq!(
-            fs::read_dir(&directory)?.count(),
-            1,
-            "temporary files remain"
-        );
+        assert_receipt(&directory, target, "0.1.0", Some("0.1.0"))?;
+        assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
         fixture.assert_user_data_unchanged()?;
 
         let output = run_installer(fixture.command(shell).args(["--version", "v0.1.0"]).env(
@@ -64,6 +61,8 @@ fn installs_each_platform_and_replaces_only_the_executable() -> Result<(), Box<d
         ))?;
         assert!(output.status.success(), "{output:?}");
         assert!(!String::from_utf8(output.stdout)?.contains("export PATH="));
+        assert_receipt(&directory, target, "0.1.0", Some("0.1.0"))?;
+        assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
     }
     Ok(())
 }
@@ -86,6 +85,9 @@ fn resolves_latest_to_one_release_and_reports_unpublished_releases() -> Result<(
             .stdout,
         format!("v0.2.0 {LINUX_TARGET}\n").as_bytes()
     );
+    let directory = fixture.home.join(".local/bin");
+    assert_receipt(&directory, LINUX_TARGET, "0.2.0", None)?;
+    assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
 
     for (version, expected) in [
         ("0.2.0-preview.3", "v0.2.0-preview.3"),
@@ -99,8 +101,15 @@ fn resolves_latest_to_one_release_and_reports_unpublished_releases() -> Result<(
                 .stdout,
             format!("{expected} {LINUX_TARGET}\n").as_bytes()
         );
+        let normalized = expected.trim_start_matches('v');
+        assert_receipt(&directory, LINUX_TARGET, normalized, Some(normalized))?;
+        assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
     }
+    let output = run_installer(&mut fixture.command("/bin/sh"))?;
+    assert!(output.status.success(), "{output:?}");
+    assert_receipt(&directory, LINUX_TARGET, "0.2.0", None)?;
     let previous = fs::read(fixture.home.join(".local/bin/cocoa"))?;
+    let previous_receipt = fs::read(directory.join(".cocoa-install.json"))?;
     for latest in [None, Some("https://github.com/ezegros/cocoa/releases")] {
         match latest {
             Some(url) => fs::write(fixture.assets.join("latest"), url)?,
@@ -110,6 +119,11 @@ fn resolves_latest_to_one_release_and_reports_unpublished_releases() -> Result<(
         assert!(!output.status.success(), "{output:?}");
         assert!(String::from_utf8(output.stderr)?.contains("publish a release"));
         assert_eq!(fs::read(fixture.home.join(".local/bin/cocoa"))?, previous);
+        assert_eq!(
+            fs::read(directory.join(".cocoa-install.json"))?,
+            previous_receipt
+        );
+        assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
     }
     Ok(())
 }
@@ -148,6 +162,8 @@ fn failed_downloads_and_checksums_preserve_the_installed_version() -> Result<(),
         fs::create_dir_all(&directory)?;
         let executable = directory.join("cocoa");
         write_executable(&executable, "previous executable")?;
+        let receipt = directory.join(".cocoa-install.json");
+        fs::write(&receipt, "previous receipt")?;
         let output = run_installer(fixture.command("/bin/sh").args(["--version", "v0.1.0"]))?;
         assert!(!output.status.success(), "{failure}: {output:?}");
         assert!(
@@ -159,7 +175,8 @@ fn failed_downloads_and_checksums_preserve_the_installed_version() -> Result<(),
             fs::metadata(&executable)?.permissions().mode() & 0o777,
             0o755
         );
-        assert_eq!(fs::read_dir(&directory)?.count(), 1, "{failure}");
+        assert_eq!(fs::read_to_string(&receipt)?, "previous receipt");
+        assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
         fixture.assert_user_data_unchanged()?;
     }
     Ok(())
@@ -301,11 +318,278 @@ fn refuses_missing_hash_tools_unsupported_platforms_and_invalid_options()
         assert!(combined.contains(message), "{combined}");
     }
     let fixture = Fixture::new("Linux", "x86_64")?;
-    for version in ["../v0.1.0", "v0.1.0\nother"] {
+    for version in [
+        "../v0.1.0",
+        "v0.1.0\nother",
+        "v01.1.0",
+        "v0.01.0",
+        "v0.1.00",
+        "v0.1.0-",
+        "v0.1.0-preview..3",
+        "v0.1.0-preview.03",
+        "v0.1.0-preview.",
+        "v0.1.0+",
+        "v0.1.0+build..3",
+        "v0.1.0+build.",
+        "v0.1.0+build+other",
+        "v18446744073709551616.1.0",
+        "v0.18446744073709551616.0",
+        "v0.1.18446744073709551616",
+    ] {
         let output = run_installer(fixture.command("/bin/sh").args(["--version", version]))?;
         assert!(!output.status.success(), "{output:?}");
         assert!(String::from_utf8(output.stderr)?.contains("Invalid version"));
         assert!(!fixture.home.join(".local/bin").exists());
+    }
+    Ok(())
+}
+
+#[test]
+fn refuses_existing_update_locks_without_removing_them() -> Result<(), Box<dyn Error>> {
+    for shell in ["/bin/sh", "/bin/bash"] {
+        for kind in ["directory", "symlink", "dangling symlink", "file"] {
+            let fixture = Fixture::new("Linux", "x86_64")?;
+            fixture.release("v0.1.0", LINUX_TARGET)?;
+            let directory = fixture.home.join(".local/bin");
+            fs::create_dir_all(&directory)?;
+            let lock = directory.join(".cocoa-update.lock");
+            let outside = fixture.root.path().join("outside");
+            match kind {
+                "directory" => {
+                    fs::create_dir(&lock)?;
+                    fs::write(lock.join("owner"), "another updater")?;
+                }
+                "symlink" => {
+                    fs::create_dir(&outside)?;
+                    fs::write(outside.join("owner"), "another updater")?;
+                    symlink(&outside, &lock)?;
+                }
+                "dangling symlink" => symlink(&outside, &lock)?,
+                "file" => fs::write(&lock, "another updater")?,
+                _ => unreachable!("all lock fixture kinds are handled"),
+            }
+            let output = run_installer(&mut fixture.command(shell))?;
+            assert!(!output.status.success(), "{shell}, {kind}: {output:?}");
+            let message = String::from_utf8(output.stderr)?;
+            assert!(message.contains("Another Cocoa installer or updater may be running"));
+            assert!(message.contains("confirm no updater is running"));
+            assert!(message.contains("manually"));
+            assert_directory_entries(&directory, &[".cocoa-update.lock"])?;
+            match kind {
+                "directory" | "symlink" => {
+                    assert_eq!(fs::read_to_string(lock.join("owner"))?, "another updater");
+                }
+                "dangling symlink" => {
+                    assert!(fs::symlink_metadata(&lock)?.file_type().is_symlink());
+                    assert!(!outside.exists());
+                }
+                "file" => assert_eq!(fs::read_to_string(&lock)?, "another updater"),
+                _ => unreachable!("all lock fixture kinds are handled"),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn refuses_unsafe_receipt_and_pending_sidecars() -> Result<(), Box<dyn Error>> {
+    for name in [".cocoa-install.json", ".cocoa-update-pending.json"] {
+        for kind in ["symlink", "dangling symlink", "directory", "fifo"] {
+            let fixture = Fixture::new("Linux", "x86_64")?;
+            fixture.release("v0.1.0", LINUX_TARGET)?;
+            let directory = fixture.home.join(".local/bin");
+            fs::create_dir_all(&directory)?;
+            write_executable(&directory.join("cocoa"), "previous executable")?;
+            let sidecar = directory.join(name);
+            let outside = fixture.root.path().join("outside");
+            match kind {
+                "symlink" => {
+                    fs::write(&outside, "do not overwrite")?;
+                    symlink(&outside, &sidecar)?;
+                }
+                "dangling symlink" => symlink(&outside, &sidecar)?,
+                "directory" => fs::create_dir(&sidecar)?,
+                "fifo" => {
+                    let output = Command::new("mkfifo").arg(&sidecar).output()?;
+                    assert!(output.status.success(), "{output:?}");
+                }
+                _ => unreachable!("all sidecar fixture kinds are handled"),
+            }
+            let before = fs::symlink_metadata(&sidecar)?.file_type();
+            let output = run_installer(fixture.command("/bin/sh").args(["--version", "0.1.0"]))?;
+            assert!(!output.status.success(), "{name}, {kind}: {output:?}");
+            assert!(String::from_utf8(output.stderr)?.contains("Refusing to replace"));
+            assert_eq!(fs::symlink_metadata(&sidecar)?.file_type(), before);
+            assert_eq!(
+                fs::read_to_string(directory.join("cocoa"))?,
+                "previous executable"
+            );
+            assert_directory_entries(&directory, &[name, "cocoa"])?;
+            if kind == "symlink" {
+                assert_eq!(fs::read_to_string(&outside)?, "do not overwrite");
+            } else {
+                assert!(!outside.exists());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn publication_failures_and_signals_retain_pending_receipts_for_recovery()
+-> Result<(), Box<dyn Error>> {
+    for shell in ["/bin/sh", "/bin/bash"] {
+        for failure in ["pending", "binary", "receipt", "HUP", "INT", "TERM"] {
+            let fixture = Fixture::new("Linux", "x86_64")?;
+            fixture.release("v0.1.0", LINUX_TARGET)?;
+            let output = run_installer(fixture.command(shell).args(["--version", "0.1.0"]))?;
+            assert!(output.status.success(), "{output:?}");
+            let directory = fixture.home.join(".local/bin");
+            let previous = fs::read(directory.join("cocoa"))?;
+            let previous_receipt = fs::read(directory.join(".cocoa-install.json"))?;
+            fixture.release("v0.2.0", LINUX_TARGET)?;
+            fs::rename(fixture.tools.join("mv"), fixture.tools.join("mv-real"))?;
+            write_executable(
+                &fixture.tools.join("mv"),
+                r#"#!/bin/sh
+set -eu
+[ -d "$HOME/.local/bin/.cocoa-update.lock" ] || exit 91
+case "$3" in
+    */.cocoa-update-pending.json) step=pending ;;
+    */cocoa) step=binary ;;
+    */.cocoa-install.json) step=receipt ;;
+    *) exit 92 ;;
+esac
+if [ "$step" = "$COCOA_TEST_FAILURE" ]; then exit 77; fi
+"${0%/*}/mv-real" "$@"
+if [ "$step" = binary ]; then
+    case "$COCOA_TEST_FAILURE" in
+        HUP|INT|TERM) kill -"$COCOA_TEST_FAILURE" "$PPID" ;;
+    esac
+fi
+"#,
+            )?;
+            let output = run_installer(
+                fixture
+                    .command(shell)
+                    .args(["--version", "0.2.0"])
+                    .env("COCOA_TEST_FAILURE", failure),
+            )?;
+            let status = match failure {
+                "HUP" => 129,
+                "INT" => 130,
+                "TERM" => 143,
+                _ => 77,
+            };
+            assert_eq!(
+                output.status.code(),
+                Some(status),
+                "{shell}, {failure}: {output:?}"
+            );
+            assert_eq!(
+                fs::read(directory.join(".cocoa-install.json"))?,
+                previous_receipt
+            );
+            if failure == "pending" {
+                assert_eq!(fs::read(directory.join("cocoa"))?, previous);
+                assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
+            } else {
+                assert_directory_entries(
+                    &directory,
+                    &[".cocoa-install.json", ".cocoa-update-pending.json", "cocoa"],
+                )?;
+                let pending: serde_json::Value = serde_json::from_slice(&fs::read(
+                    directory.join(".cocoa-update-pending.json"),
+                )?)?;
+                assert_eq!(pending["version"], "0.2.0");
+                assert_eq!(pending["pinned_version"], "0.2.0");
+                let new_executable = fs::read(
+                    fixture
+                        .root
+                        .path()
+                        .join(format!("staging/cocoa-{LINUX_TARGET}/cocoa")),
+                )?;
+                let checksum: String = Sha256::digest(&new_executable)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                assert_eq!(pending["sha256"], checksum);
+                if failure == "binary" {
+                    assert_eq!(fs::read(directory.join("cocoa"))?, previous);
+                } else {
+                    assert_eq!(fs::read(directory.join("cocoa"))?, new_executable);
+                }
+            }
+            fs::remove_file(fixture.tools.join("mv"))?;
+            fs::rename(fixture.tools.join("mv-real"), fixture.tools.join("mv"))?;
+            let output = run_installer(fixture.command(shell).args(["--version", "0.2.0"]))?;
+            assert!(output.status.success(), "{output:?}");
+            assert_receipt(&directory, LINUX_TARGET, "0.2.0", Some("0.2.0"))?;
+            assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn cleans_up_when_signaled_while_creating_lock_or_staging() -> Result<(), Box<dyn Error>> {
+    for shell in ["/bin/sh", "/bin/bash"] {
+        for tool in ["mkdir", "mktemp"] {
+            let fixture = Fixture::new("Linux", "x86_64")?;
+            let original = fixture.tools.join(tool);
+            fs::rename(&original, fixture.tools.join(format!("{tool}-real")))?;
+            write_executable(
+                &original,
+                r#"#!/bin/sh
+set -eu
+"$0-real" "$@"
+case "$0:$1" in
+    */mkdir:*/.cocoa-update.lock|*/mktemp:-d) kill -TERM "$COCOA_TEST_INSTALLER_PROCESS" ;;
+esac
+"#,
+            )?;
+            let mut script =
+                b"COCOA_TEST_INSTALLER_PROCESS=$$; export COCOA_TEST_INSTALLER_PROCESS\n".to_vec();
+            script.extend_from_slice(INSTALLER);
+            let output = run_script(&mut fixture.command(shell), &script)?;
+            assert_eq!(
+                output.status.code(),
+                Some(143),
+                "{shell}, {tool}: {output:?}"
+            );
+            assert_directory_entries(&fixture.home.join(".local/bin"), &[])?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn installs_valid_semver_without_running_the_downloaded_executable() -> Result<(), Box<dyn Error>> {
+    for version in ["v0.0.0", "v1.2.3-preview.0-x+build.01-2", "v1.2.3+001"] {
+        let fixture = Fixture::new("Linux", "x86_64")?;
+        fixture.release(version, LINUX_TARGET)?;
+        let marker = fixture.root.path().join("executed");
+        write_executable(
+            &fixture
+                .root
+                .path()
+                .join(format!("staging/cocoa-{LINUX_TARGET}/cocoa")),
+            &format!(
+                "#!/bin/sh\nprintf executed > '{}'\nexit 99\n",
+                marker.display()
+            ),
+        )?;
+        fixture.pack(version, LINUX_TARGET)?;
+        let output = run_installer(fixture.command("/bin/sh").args(["--version", version]))?;
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            !marker.exists(),
+            "the installer must not execute release binaries"
+        );
+        let normalized = version.trim_start_matches('v');
+        let directory = fixture.home.join(".local/bin");
+        assert_receipt(&directory, LINUX_TARGET, normalized, Some(normalized))?;
+        assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
     }
     Ok(())
 }
@@ -339,6 +623,7 @@ impl Fixture {
             "gzip",
             "mktemp",
             "mkdir",
+            "rmdir",
             "chmod",
             "mv",
             "rm",
@@ -490,7 +775,50 @@ fn write_checksum(archive: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn assert_receipt(
+    directory: &Path,
+    target: &str,
+    version: &str,
+    pinned_version: Option<&str>,
+) -> Result<(), Box<dyn Error>> {
+    let bytes = fs::read(directory.join(".cocoa-install.json"))?;
+    assert!(bytes.len() <= 4096);
+    let receipt: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let checksum: String = Sha256::digest(fs::read(directory.join("cocoa"))?)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        receipt,
+        serde_json::json!({
+            "schema": 1,
+            "repository": "ezegros/cocoa",
+            "target": target,
+            "version": version,
+            "sha256": checksum,
+            "pinned_version": pinned_version,
+            "checked_at": 0,
+        })
+    );
+    Ok(())
+}
+
+fn assert_directory_entries(directory: &Path, expected: &[&str]) -> Result<(), Box<dyn Error>> {
+    let mut actual = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<Vec<_>, _>>()?;
+    actual.sort();
+    let mut expected: Vec<_> = expected.iter().map(std::ffi::OsString::from).collect();
+    expected.sort();
+    assert_eq!(actual, expected, "unexpected installer files remain");
+    Ok(())
+}
+
 fn run_installer(command: &mut Command) -> Result<Output, Box<dyn Error>> {
+    run_script(command, INSTALLER)
+}
+
+fn run_script(command: &mut Command, script: &[u8]) -> Result<Output, Box<dyn Error>> {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -500,6 +828,6 @@ fn run_installer(command: &mut Command) -> Result<Output, Box<dyn Error>> {
         .stdin
         .take()
         .ok_or("installer stdin unavailable")?
-        .write_all(INSTALLER)?;
+        .write_all(script)?;
     Ok(child.wait_with_output()?)
 }

@@ -59,6 +59,12 @@ Exit status `0` means the root answered, cleanup settled and final evidence coll
 
 `--export PATH` writes the sanitized whole-session JSON described below, after shutdown and before the stdout outcome. The destination must be a new file in an existing directory. Cocoa writes it privately and refuses to replace an existing file. An export error makes execution fail without discarding an already completed root answer. A failed or cancelled run still attempts export when it has a session attachment. Neither this command nor its export scores correctness or runs a benchmark.
 
+## Updates
+
+`cocoa update` installs a newer stable release unless the installation is pinned. Use `--check` to report availability, `--version VERSION` to install and persistently pin an exact release, or `--unpin` to resume stable updates. These options are mutually exclusive. No terminal, model credentials or valid provider configuration is required.
+
+Updates take effect on the next launch. Source-installed and unmanaged executables require their original installation method. See [automatic updates, pinning and rollback](installation.md#update-roll-back-or-uninstall).
+
 ## Models and authentication
 
 | Command | Purpose |

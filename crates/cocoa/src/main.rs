@@ -33,6 +33,32 @@ fn command() -> Result<ExitCode, CommandError> {
     };
     let mut resume = None;
     let menu = match arguments.command {
+        Some(config::Command::Update(options)) => {
+            let updater = cocoa::update::Updater::current()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(CommandError::Runtime)?;
+            return runtime.block_on(async {
+                use tokio::signal::unix::{SignalKind, signal};
+                let mut interrupt = signal(SignalKind::interrupt()).map_err(CommandError::Runtime)?;
+                let mut terminate = signal(SignalKind::terminate()).map_err(CommandError::Runtime)?;
+                tokio::select! {
+                    result = updater.run(options.into(), |message| eprintln!("{message}")) => {
+                        println!("{}", result?);
+                        Ok(ExitCode::SUCCESS)
+                    }
+                    _ = interrupt.recv() => {
+                        eprintln!("Cocoa update cancelled. A replacement already being published may finish; check again before retrying.");
+                        Ok(ExitCode::from(130))
+                    }
+                    _ = terminate.recv() => {
+                        eprintln!("Cocoa update cancelled. A replacement already being published may finish; check again before retrying.");
+                        Ok(ExitCode::from(143))
+                    }
+                }
+            });
+        }
         Some(config::Command::Exec {
             instruction,
             export,
@@ -154,6 +180,8 @@ fn command() -> Result<ExitCode, CommandError> {
 
 #[derive(Debug, thiserror::Error)]
 enum CommandError {
+    #[error(transparent)]
+    Update(#[from] cocoa::update::Error),
     #[error(transparent)]
     Config(#[from] config::ConfigError),
     #[error(transparent)]

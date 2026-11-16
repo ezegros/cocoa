@@ -10,6 +10,7 @@ clap = "4.6.7"
 crossterm = { version = "0.29.0", default-features = false }
 diffy = "0.5.2"
 eventsource-stream = "0.2.3"
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 futures-util = { version = "0.3.34", default-features = false }
 httpdate = "1.0.3"
 ignore = "0.4.34"
@@ -30,10 +31,12 @@ secrecy = "0.10.3"
 serde = "1.0.229"
 serde-saphyr = { version = "2.1.1", default-features = false, features = ["deserialize"] }
 serde_json = "1.0.154"
+semver = { version = "1.0.28", features = ["serde"] }
 sha2 = { version = "0.11.1", default-features = false }
 similar = "3.2.1"
 sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite-bundled", "runtime-tokio", "migrate", "macros"] }
 syntect = { version = "5.3.0", default-features = false }
+tar = { version = "0.4.46", default-features = false }
 tempfile = "3.27.0"
 time = { version = "0.3.55", default-features = false, features = ["parsing"] }
 thiserror = "2.0.21"

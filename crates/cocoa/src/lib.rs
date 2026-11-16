@@ -6,6 +6,7 @@ pub mod chatgpt;
 pub mod mcp;
 pub mod persistence;
 pub mod theme;
+pub mod update;
 pub mod web_search;
 
 mod brand;

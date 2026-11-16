@@ -358,6 +358,8 @@ pub struct Arguments {
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Update Cocoa, check availability or pin an exact release.
+    Update(cocoa::update::Arguments),
     /// Run one instruction without a terminal and print a JSON outcome.
     Exec {
         /// Save a sanitized whole-session JSON export after shutdown; path must not exist.
@@ -588,6 +590,9 @@ struct Settings {
     /// Replace the busy animation with a static bar. Omission enables motion.
     #[serde(skip_serializing_if = "Option::is_none")]
     reduced_motion: Option<bool>,
+    /// Install stable updates in the background at interactive startup. Default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auto_update: Option<bool>,
     /// Submit messages during execution for the next model round. Default true.
     #[serde(skip_serializing_if = "Option::is_none")]
     message_steering: Option<bool>,
@@ -930,6 +935,18 @@ pub fn presentation() -> Result<Presentation, ConfigError> {
         theme: settings.theme.unwrap_or_default(),
         reduced_motion: settings.reduced_motion.unwrap_or_default(),
     })
+}
+
+/// Read the automatic-update preference without resolving inference credentials.
+/// `COCOA_AUTO_UPDATE=0` disables it for this process, including with invalid config.
+///
+/// # Errors
+/// Rejects unreadable, oversized or malformed configuration.
+pub fn auto_update() -> Result<bool, ConfigError> {
+    if std::env::var_os("COCOA_AUTO_UPDATE").is_some_and(|value| value == "0") {
+        return Ok(false);
+    }
+    Ok(read_settings()?.auto_update.unwrap_or(true))
 }
 
 /// Read alias mappings without requiring credentials or a selected alias.

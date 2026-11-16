@@ -22,6 +22,7 @@ cocoa-tools = { path = "../cocoa-tools" }
 clap = { workspace = true, features = ["derive"] }
 crossterm = { workspace = true, features = ["use-dev-tty", "osc52"] }
 diffy.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 ignore.workspace = true
@@ -35,13 +36,15 @@ roxmltree.workspace = true
 secrecy.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["float_roundtrip"] }
+semver.workspace = true
 sha2.workspace = true
 similar = { workspace = true, features = ["inline", "unicode"] }
 sqlx.workspace = true
 syntect = { workspace = true, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "signal", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt"] }

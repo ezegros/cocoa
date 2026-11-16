@@ -97,6 +97,7 @@ Saved credentials are plaintext. Cocoa requires owner-only permissions, `0600` f
 | `default_alias` | Unset | Configured alias to select at startup unless overridden |
 | `theme` | `dark-chocolate` | `dark-chocolate`, `cacao-grove`, `milk-chocolate` or `terminal-native` |
 | `reduced_motion` | `false` | Static busy indicator |
+| `auto_update` | `true` | Check and install stable updates in the background at interactive startup; honors version pins |
 | `message_steering` | `true` | Queue messages while the agent works |
 | `web_search` | `{"provider":"exa"}` | Built-in Exa, disabled, or an MCP server; see [search](customization.md#web-search) |
 | `mcp_servers` | `{}` | HTTP server configuration managed by `cocoa mcp`; see [MCP](customization.md#mcp-servers) |
@@ -110,6 +111,8 @@ Saved credentials are plaintext. Cocoa requires owner-only permissions, `0600` f
 | `compaction` | See below | Encoded-request and summary budgets |
 
 `--theme` and `--reduced-motion` override presentation for one launch without saving it. `/theme` changes the current view only. Most execution settings apply when creating a session; changing them can prevent resume of an existing session.
+
+`COCOA_AUTO_UPDATE=0` disables automatic updates for one process. Manual `cocoa update` and `/update` still work when automatic updates are disabled. Version pins belong to the installation and are managed with `update --version VERSION` and `update --unpin`, not project settings. See [updates and rollback](installation.md#update-roll-back-or-uninstall).
 
 ## Compaction
 

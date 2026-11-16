@@ -71,7 +71,7 @@ const THEME_COMMANDS: [(&str, Theme); 4] = [
     ("/theme terminal-native", Theme::TerminalNative),
 ];
 
-const SLASH_COMMANDS: [&str; 12] = [
+const SLASH_COMMANDS: [&str; 13] = [
     "/login",
     "/logout",
     "/aliases",
@@ -84,6 +84,7 @@ const SLASH_COMMANDS: [&str; 12] = [
     "/rewind",
     "/sessions",
     "/theme",
+    "/update",
 ];
 
 /// Waits observe issued work without producing effects; the transcript shows
@@ -2206,6 +2207,7 @@ impl Chat {
                         "/models" => "Select an alias or provider model",
                         "/aliases" => "Edit alias model choices and priorities",
                         "/theme" => "Select a theme",
+                        "/update" => "Update Cocoa or pin a release",
                         "/mcp" => "Manage MCP servers",
                         "/new" => "Start a new session",
                         "/resume" => "Resume a saved session",

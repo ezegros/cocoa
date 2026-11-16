@@ -1019,6 +1019,14 @@ fn slash_commands_run_while_a_turn_is_active() -> io::Result<()> {
     let mut session = Terminal::spawn(&home, &["initial assignment"], 90, 28, None)?;
     session.until(|_| home.join("steering-started").exists())?;
     assert_eq!(server.requests()?.len(), 1);
+    session.text("/upd")?;
+    session.wait_text("Update Cocoa or pin a release")?;
+    capture_session_view(&mut session, "update-completion")?;
+    session.key(b"\x15")?;
+    session.command("/update --check")?;
+    session.wait_text("not installer-managed")?;
+    assert_eq!(server.requests()?.len(), 1, "updater contacted the model");
+    capture_session_view(&mut session, "update-during-turn")?;
     session.command("/model")?;
     session.wait_text("Alias and model are fixed for this session.")?;
     assert!(

@@ -6,13 +6,14 @@ COCOA_REPOSITORY=${COCOA_REPOSITORY:-ezegros/cocoa}
 
 main() {
     version=latest
+    explicit_version=0
     install_directory=${COCOA_INSTALL_DIR-}
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --version|--install-dir)
                 [ "$#" -ge 2 ] && [ -n "$2" ] || fail "Missing value for $1"
                 case "$1" in
-                    --version) version=$2 ;;
+                    --version) version=$2; explicit_version=1 ;;
                     --install-dir) install_directory=$2 ;;
                 esac
                 shift 2
@@ -23,7 +24,7 @@ main() {
                     '' \
                     'Usage: bash install.sh [--version VERSION] [--install-dir DIRECTORY]' \
                     '' \
-                    '  --version VERSION        Release version, with or without v; default: latest stable' \
+                    '  --version VERSION        Pin a release version, with or without v; default: latest stable' \
                     '  --install-dir DIRECTORY  Absolute binary directory; default: ~/.local/bin' \
                     '  COCOA_INSTALL_DIR        Set the default binary directory' \
                     "  COCOA_REPOSITORY         GitHub owner/repo; default: $COCOA_REPOSITORY" \
@@ -49,7 +50,7 @@ main() {
         *) fail 'COCOA_REPOSITORY must be a GitHub owner/repo.' ;;
     esac
 
-    for dependency in curl uname tar gzip mktemp mkdir chmod mv rm awk sed; do
+    for dependency in curl uname tar gzip mktemp mkdir rmdir chmod mv rm awk sed; do
         command -v "$dependency" > /dev/null 2>&1 || fail "Required command not found: $dependency"
     done
     [ -x /bin/bash ] || fail 'Cocoa requires /bin/bash at runtime. Install Bash first.'
@@ -71,6 +72,39 @@ main() {
         *) fail "Unsupported platform: $system $architecture. Cocoa supports macOS and Linux on ARM64 and x86-64." ;;
     esac
 
+    if [ "$version" != latest ]; then
+        case "$version" in v*) ;; *) version=v$version ;; esac
+        validate_version
+    fi
+    destination=$install_directory/cocoa
+    receipt=$install_directory/.cocoa-install.json
+    pending=$install_directory/.cocoa-update-pending.json
+    lock_directory=$install_directory/.cocoa-update.lock
+    umask 077
+    temporary_directory=
+    lock_owned=0
+    trap cleanup 0
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    mkdir -p "$install_directory"
+    # Record created paths before honoring signals so cleanup only removes our own files.
+    signal_status=0
+    trap 'signal_status=129' HUP
+    trap 'signal_status=130' INT
+    trap 'signal_status=143' TERM
+    if mkdir "$lock_directory" 2>/dev/null; then
+        lock_owned=1
+    else
+        fail "Cannot acquire update lock: $lock_directory. Another Cocoa installer or updater may be running. If an update was interrupted, confirm no updater is running, then remove this lock manually and retry."
+    fi
+    validate_installation_paths
+    temporary_directory=$(mktemp -d "$install_directory/.cocoa-install.XXXXXXXX")
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    [ "$signal_status" -eq 0 ] || exit "$signal_status"
+
     release_root=https://github.com/$COCOA_REPOSITORY/releases
     if [ "$version" = latest ]; then
         if ! release_url=$(download --max-filesize 1048576 --output /dev/null --write-out '%{url_effective}' "$release_root/latest"); then
@@ -82,25 +116,12 @@ main() {
         esac
     fi
     case "$version" in v*) ;; *) version=v$version ;; esac
-    if ! printf '%s\n' "$version" | LC_ALL=C awk '
-        $0 !~ /^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/ { invalid = 1 }
-        END { exit (NR != 1 || invalid) }
-    '; then
-        fail 'Invalid version. Use a release version such as v0.1.0.'
+    validate_version
+    normalized_version=${version#v}
+    pinned_version=null
+    if [ "$explicit_version" -eq 1 ]; then
+        pinned_version=\"$normalized_version\"
     fi
-
-    destination=$install_directory/cocoa
-    if [ -L "$destination" ] || { [ -e "$destination" ] && [ ! -f "$destination" ]; }; then
-        fail "Refusing to replace a symlink or non-regular file: $destination"
-    fi
-    umask 077
-    temporary_directory=
-    trap cleanup 0
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
-    mkdir -p "$install_directory"
-    temporary_directory=$(mktemp -d "$install_directory/.cocoa-install.XXXXXXXX")
 
     archive_name=cocoa-$target.tar.gz
     archive=$temporary_directory/$archive_name
@@ -143,7 +164,19 @@ main() {
     fi
     [ -s "$temporary_directory/cocoa" ] || fail 'The Cocoa executable is empty.'
     chmod 755 "$temporary_directory/cocoa"
+    case "$checksum_command" in
+        sha256sum) binary_checksum=$(sha256sum < "$temporary_directory/cocoa") ;;
+        shasum) binary_checksum=$(shasum -a 256 < "$temporary_directory/cocoa") ;;
+    esac
+    binary_checksum=${binary_checksum%% *}
+    new_receipt=$(printf '{"schema":1,"repository":"%s","target":"%s","version":"%s","sha256":"%s","pinned_version":%s,"checked_at":0}' \
+        "$COCOA_REPOSITORY" "$target" "$normalized_version" "$binary_checksum" "$pinned_version")
+    [ "${#new_receipt}" -lt 4096 ] || fail 'The installation receipt exceeds the 4096-byte limit.'
+    printf '%s\n' "$new_receipt" > "$temporary_directory/receipt.json"
+    validate_installation_paths
+    mv -f "$temporary_directory/receipt.json" "$pending"
     mv -f "$temporary_directory/cocoa" "$destination"
+    mv -f "$pending" "$receipt"
     printf 'Installed %s\n' "$destination"
     case ":${PATH-}:" in
         *:"$install_directory":*) printf 'Run cocoa from your project directory to get started.\n' ;;
@@ -153,6 +186,53 @@ main() {
             printf 'To keep it for future terminals, add that line to your shell profile. Then run cocoa.\n'
             ;;
     esac
+}
+
+validate_version() {
+    if ! printf '%s\n' "$version" | LC_ALL=C awk '
+        {
+            value = $0
+            if (value !~ /^v[0-9A-Za-z.+-]+$/) invalid = 1
+            sub(/^v/, "", value)
+            if (length(value) > 128) invalid = 1
+            position = index(value, "+")
+            if (position) {
+                build = substr(value, position + 1)
+                value = substr(value, 1, position - 1)
+                count = split(build, identifiers, ".")
+                for (i = 1; i <= count; i++) {
+                    if (identifiers[i] !~ /^[0-9A-Za-z-]+$/) invalid = 1
+                }
+                if (!count) invalid = 1
+            }
+            position = index(value, "-")
+            if (position) {
+                prerelease = substr(value, position + 1)
+                value = substr(value, 1, position - 1)
+                count = split(prerelease, identifiers, ".")
+                for (i = 1; i <= count; i++) {
+                    if (identifiers[i] !~ /^[0-9A-Za-z-]+$/ || identifiers[i] ~ /^0[0-9]+$/) invalid = 1
+                }
+                if (!count) invalid = 1
+            }
+            if (value !~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) invalid = 1
+            count = split(value, identifiers, ".")
+            for (i = 1; i <= count; i++) {
+                if (length(identifiers[i]) > 20 || (length(identifiers[i]) == 20 && "x" identifiers[i] > "x18446744073709551615")) invalid = 1
+            }
+        }
+        END { exit (NR != 1 || invalid) }
+    '; then
+        fail 'Invalid version. Use a release version such as v0.1.0.'
+    fi
+}
+
+validate_installation_paths() {
+    for path in "$destination" "$receipt" "$pending"; do
+        if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+            fail "Refusing to replace a symlink or non-regular file: $path"
+        fi
+    done
 }
 
 download() {
@@ -167,9 +247,16 @@ fail() {
 }
 
 cleanup() {
-    if [ -n "$temporary_directory" ]; then
+    exit_status=$?
+    trap - 0
+    trap '' HUP INT TERM
+    if [ -n "${temporary_directory-}" ]; then
         rm -rf -- "$temporary_directory" || printf 'Could not remove installer temporary files: %s\n' "$temporary_directory" >&2
     fi
+    if [ "${lock_owned-0}" -eq 1 ]; then
+        rmdir -- "$lock_directory" || printf 'Could not remove update lock; confirm no updater is running before removing it manually: %s\n' "$lock_directory" >&2
+    fi
+    exit "$exit_status"
 }
 
 main "$@"

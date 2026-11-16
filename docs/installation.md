@@ -55,12 +55,31 @@ Only run the file after a successful download. The installer checks the archive 
 
 ## Update, roll back or uninstall
 
-Rerun the install command to update, or pin an older published version to roll back.
+Installer-managed installations automatically check for stable updates in the background when interactive chat or resume starts, at most once per hour per installation. An available update installs without interrupting the current session and takes effect on the next launch. There are no periodic checks during a session. Help, version, `exec` and administrative commands do not start automatic updates.
 
-Remove the default installation with:
+Run `cocoa update` or `/update` to update manually. Both honor a saved version pin rather than silently returning to latest. The options are the same in the CLI and chat:
+
+| Command | Behavior |
+| --- | --- |
+| `cocoa update` | Install a newer stable release, or keep the pinned version |
+| `cocoa update --check` | Report installed and latest stable versions, and any pin, without installing or changing policy |
+| `cocoa update --version 0.2.3` | Install that exact release and keep it pinned, even if it is older |
+| `cocoa update --unpin` | Resume stable updates and install a newer stable release if available |
+
+Manual operations bypass the one-hour check interval. Ordinary updates and unpinning never downgrade a newer installed version. Exact versions accept a `v` prefix and preview tags. Passing `--version` to the installer also creates a persistent pin. Reusing the installer without `--version` selects latest stable and clears the pin.
+
+Set `"auto_update": false` in `~/.config/cocoa/config.json` to disable automatic checks and installations. `COCOA_AUTO_UPDATE=0` disables them for one process. Neither prevents manual updates.
+
+Self-updates require the ownership receipt written by the installer. Existing installations from older installers must rerun the current installer once. Cargo installations and copied binaries do not update themselves; use their original installation method or reinstall with the installer. The receipt records the repository, platform, installed binary hash and pin beside the executable, not in project configuration.
+
+Downloads use HTTPS and release checksums. Cocoa stages the replacement beside the executable and uses an atomic rename, so existing processes continue running their original binary. A shared installation lock prevents concurrent installer/updater writes. If an interrupted operation leaves `.cocoa-update.lock`, confirm that no installer or updater is still running before removing that directory. The next update reconciles any pending receipt against the installed binary.
+
+Rolling back replaces only the executable. It does not roll back configuration, credentials or session storage. Older binaries can reject newer configuration keys or database schemas; a pin does not make sessions backward-compatible. Keep newer session data rather than deleting it to force an older binary to open it.
+
+Close Cocoa first, then remove the default installation with:
 
 ```sh
-rm "$HOME/.local/bin/cocoa"
+rm "$HOME/.local/bin/cocoa" "$HOME/.local/bin/.cocoa-install.json"
 ```
 
-For a custom installation, remove that directory's `cocoa` executable. Uninstalling does not delete credentials, configuration or sessions. Their locations are listed in [configuration](configuration.md#file-locations). Remove a PATH entry only if other programs do not need it.
+For a custom installation, remove that directory's executable and receipt. Uninstalling does not delete credentials, configuration or sessions. Their locations are listed in [configuration](configuration.md#file-locations). Remove a PATH entry only if other programs do not need it.

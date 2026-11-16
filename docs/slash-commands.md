@@ -18,8 +18,11 @@ Type `/` in chat to browse commands. Enter completes a partial command; Enter on
 | `/rewind` | Pick an accepted root prompt, fork before it, and restore it with attachments to the editor |
 | `/copy` | Copy the latest completed assistant answer with its Markdown source |
 | `/theme [NAME]` | Choose or apply a palette for the current view, without saving it |
+| `/update [--check \| --version VERSION \| --unpin]` | Update Cocoa, report availability or manage a persistent version pin |
 
 `/resume` also accepts `--all` and `--cwd DIRECTORY`, as described in the [CLI reference](cli.md#sessions). Switching sessions requires idle work and confirmation before discarding a draft. A session's model stays fixed after it starts; use `/new` before choosing a different model.
+
+`/update` also works during an active turn. It runs in the background without sending a model request, restarting Cocoa or changing the conversation. A new binary takes effect on the next launch. Its options match [`cocoa update`](cli.md#updates).
 
 Selecting an alias by name starts with its first regular choice. The `/models` alias picker shows alias names without a first-model detail. Left/right selects among the highlighted alias's saved regular choices without changing their saved effort. The separate provider model browser still uses left/right to change effort for direct selections. Use `/aliases` to edit saved effort or toggle fallback-only status for each model. `/alias` is not a command.
 

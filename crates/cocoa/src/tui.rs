@@ -100,6 +100,10 @@ pub(crate) async fn run(
     let mut owned = None;
     let mut attachment = None;
     let mut commands = Commands::default();
+    match cocoa::update::Updater::current() {
+        Ok(updater) => commands.updater = Some(updater),
+        Err(error) => tracing::debug!(%error, "cannot locate executable for updates"),
+    }
     let mut chat = Chat::new(65_536);
     let mut interrupt = match signal(SignalKind::interrupt()) {
         Ok(interrupt) => interrupt,
@@ -198,6 +202,13 @@ pub(crate) async fn run(
             owned = target.session;
         }
         if let Some(menu) = open_menu { commands.open(menu, chat); }
+        if open_menu.is_none() {
+            match config::auto_update() {
+                Ok(true) => commands.start_update(cocoa::update::Request::Automatic, chat),
+                Ok(false) => {}
+                Err(error) => tracing::debug!(%error, "automatic updates disabled by unreadable configuration"),
+            }
+        }
         modes.enter()?;
         let mut active_terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
         #[cfg(unix)]
@@ -1364,6 +1375,8 @@ fn draw(
 #[derive(Default)]
 struct Commands {
     working_directory: PathBuf,
+    updater: Option<cocoa::update::Updater>,
+    update: Option<UpdateJob>,
     dialog: Option<Dialog>,
     picker: Option<SessionPicker>,
     rewind: Option<RewindPicker>,
@@ -1392,6 +1405,12 @@ struct Commands {
     ignore_enter: bool,
     status: Status,
     reported_status: Option<Status>,
+}
+
+struct UpdateJob {
+    task: tokio::task::JoinHandle<Result<cocoa::update::Outcome, cocoa::update::Error>>,
+    progress: tokio::sync::watch::Receiver<&'static str>,
+    automatic: bool,
 }
 
 struct Paste {
@@ -1438,6 +1457,35 @@ enum LocalError {
 }
 
 impl Commands {
+    fn start_update(&mut self, request: cocoa::update::Request, chat: &mut Chat) {
+        if self.update.is_some() {
+            chat.notice("A Cocoa update is already running.");
+            return;
+        }
+        let Some(updater) = self.updater.clone() else {
+            chat.notice(
+                "Cannot locate the Cocoa executable. Run cocoa update from a new terminal.",
+            );
+            return;
+        };
+        let automatic = matches!(request, cocoa::update::Request::Automatic);
+        let (sender, progress) = tokio::sync::watch::channel("Checking for Cocoa updates...");
+        if !automatic {
+            chat.notice("Checking for Cocoa updates...");
+        }
+        self.update = Some(UpdateJob {
+            task: tokio::spawn(async move {
+                updater
+                    .run(request, |message| {
+                        sender.send_replace(message);
+                    })
+                    .await
+            }),
+            progress,
+            automatic,
+        });
+    }
+
     fn report(&mut self, status: Status) -> io::Result<()> {
         if self.reported_status != Some(status) {
             status.report()?;
@@ -1473,6 +1521,14 @@ impl Commands {
         }
         let words: Vec<_> = command.trim_start_matches('/').split_whitespace().collect();
         match words.as_slice() {
+            ["update", ..] => {
+                use clap::Parser;
+                match config::Arguments::try_parse_from(std::iter::once("cocoa").chain(words.iter().copied())) {
+                    Ok(config::Arguments { command: Some(config::Command::Update(options)), .. }) => self.start_update(options.into(), chat),
+                    Ok(_) => chat.notice("Use /update, /update --check, /update --version VERSION or /update --unpin."),
+                    Err(error) => chat.notice(&error.to_string()),
+                }
+            }
             ["mcp"] => {
                 let manager = match &self.mcp {
                     Some(manager) => Ok(manager.clone()),
@@ -1757,6 +1813,41 @@ impl Commands {
             changed: false,
             settings_saved: false,
         };
+        if let Some(update) = &mut self.update
+            && !update.automatic
+            && update.progress.has_changed().unwrap_or(false)
+        {
+            chat.notice(update.progress.borrow_and_update().as_ref());
+            outcome.changed = true;
+        }
+        if self
+            .update
+            .as_ref()
+            .is_some_and(|update| update.task.is_finished())
+        {
+            if let Some(update) = self.update.take() {
+                match update.task.await {
+                    Ok(Ok(result))
+                        if !update.automatic
+                            || matches!(result, cocoa::update::Outcome::Installed { .. }) =>
+                    {
+                        chat.notice(&result.to_string())
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) if update.automatic => {
+                        tracing::debug!(%error, "automatic Cocoa update failed")
+                    }
+                    Ok(Err(error)) => chat.notice(&error.to_string()),
+                    Err(error) if update.automatic => {
+                        tracing::debug!(%error, "automatic Cocoa update worker failed")
+                    }
+                    Err(_) => {
+                        chat.notice("Cocoa update worker failed. Try again with cocoa update.")
+                    }
+                }
+            }
+            outcome.changed = true;
+        }
         if self
             .mcp_job
             .as_ref()
@@ -1965,6 +2056,9 @@ impl Commands {
 
 impl Drop for Commands {
     fn drop(&mut self) {
+        if let Some(update) = &self.update {
+            update.task.abort();
+        }
         if let Some((cancellation, _)) = &self.mcp_job {
             cancellation.cancel();
         }

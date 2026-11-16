@@ -15,6 +15,51 @@ use cocoa::persistence::SessionDatabase;
 use sqlx::{Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 
 #[test]
+fn update_is_noninteractive_and_independent_of_provider_configuration() -> Result<(), Box<dyn Error>>
+{
+    let home = tempfile::tempdir()?;
+    std::fs::create_dir_all(home.path().join(".config/cocoa"))?;
+    std::fs::write(
+        home.path().join(".config/cocoa/config.json"),
+        "invalid JSON",
+    )?;
+    for arguments in [
+        vec!["update"],
+        vec!["update", "--check"],
+        vec!["update", "--version", "v0.2.3-preview.1"],
+        vec!["update", "--unpin"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cocoa"))
+            .env_clear()
+            .env("HOME", home.path())
+            .env("COCOA_AUTO_UPDATE", "0")
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output_bounded()?;
+        assert!(!output.status.success());
+        let diagnostic = String::from_utf8(output.stderr)?;
+        assert!(diagnostic.contains("not installer-managed"), "{diagnostic}");
+        assert!(output.stdout.is_empty());
+    }
+    for arguments in [
+        vec!["update", "--check", "--unpin"],
+        vec!["update", "--check", "--version", "0.2.3"],
+        vec!["update", "--version", "0.2.3", "--unpin"],
+        vec!["update", "--version", "latest"],
+        vec!["update", "--version", "../0.2.3"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_cocoa"))
+            .env_clear()
+            .args(arguments)
+            .stdin(Stdio::null())
+            .output_bounded()?;
+        assert!(!output.status.success());
+        assert!(String::from_utf8(output.stderr)?.contains("invalid arguments"));
+    }
+    Ok(())
+}
+
+#[test]
 fn theme_flags_accept_only_the_four_builtin_palettes() -> Result<(), Box<dyn Error>> {
     for theme in [
         "dark-chocolate",
