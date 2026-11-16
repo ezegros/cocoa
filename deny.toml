@@ -1,0 +1,56 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0459"
+reason = """
+Maintainer accepted the SQLite memory-disclosure risk on 2026-11-15 while waiting
+for a published SQLx release supporting fixed bundled SQLite. Current path:
+cocoa -> sqlx/sqlx-macros -> sqlx-sqlite 0.9.0 -> libsqlite3-sys 0.37.0.
+Track https://github.com/transact-rs/sqlx/pull/4502. Review before each release;
+remove after a compatible SQLx/native upgrade and persistence validation.
+Owner-only storage does not fix the crafted database/WAL vulnerability.
+"""
+
+[[advisories.ignore]]
+id = "RUSTSEC-2025-0141"
+reason = """
+Maintainer accepted the bincode maintenance risk on 2026-11-15. Current path:
+cocoa -> syntect 5.3.0 -> bincode 1.3.3. Decoding uses compiled-in syntax/theme
+assets, not user-supplied serialized data. Track https://github.com/trishume/syntect/pull/694.
+Review before each release and changes to asset loading or dependency paths;
+remove when a published Syntect release removes bincode. This is not a known vulnerability.
+"""
+
+[licenses]
+include-dev = true
+include-build = true
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+# Unpublished workspace crates still ship in the public executable.
+ignore = false
+
+[bans]
+# Transitive major versions cannot always be unified by this workspace.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

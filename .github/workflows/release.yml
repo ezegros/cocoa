@@ -1,0 +1,217 @@
+name: Release
+
+# Every push to main builds the release archives and keeps them as workflow artifacts.
+# Running the workflow by hand from main publishes them as a preview or a release; the workflow
+# creates the tag itself.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "preview publishes v<version>-preview.N as a pre-release; release publishes v<version> as the latest release."
+        type: choice
+        options: [preview, release]
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Publishing runs queue behind each other so two previews never pick the same number.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'publish' || github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Choose the version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          base=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ "$EVENT" != workflow_dispatch ]; then
+            echo "version=$base" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Publish from main, not $GITHUB_REF."
+            exit 1
+          fi
+          if ! printf '%s\n' "$base" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::The workspace version must be X.Y.Z; found $base."
+            exit 1
+          fi
+          ci=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=CI%20required" \
+            --jq '[.check_runs[] | select(.conclusion == "success")] | length')
+          if [ "$ci" -eq 0 ]; then
+            echo "::error::CI has not passed on $GITHUB_SHA. Wait for the CI run on main to succeed."
+            exit 1
+          fi
+          tags=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v$base" --jq '.[].ref | ltrimstr("refs/tags/")')
+          if printf '%s\n' "$tags" | grep -qx "v$base"; then
+            echo "::error::v$base is already released. Bump the version in Cargo.toml first."
+            exit 1
+          fi
+
+          case "$CHANNEL" in
+            release)
+              version=$base
+              ;;
+            preview)
+              pattern=$(printf '%s' "$base" | sed 's/\./\\./g')
+              last=$(printf '%s\n' "$tags" | sed -n "s/^v$pattern-preview\.\([0-9][0-9]*\)$/\1/p" | sort -n | tail -n 1)
+              version=$base-preview.$(( ${last:-0} + 1 ))
+              ;;
+            *)
+              echo "::error::Unknown channel $CHANNEL."
+              exit 1
+              ;;
+          esac
+          echo "Publishing v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: [plan]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      TARGET: ${{ matrix.target }}
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install --profile minimal
+          rustup target add "$TARGET"
+      - name: Install the musl C toolchain
+        if: ${{ endsWith(matrix.target, '-linux-musl') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          # QuickJS, SQLite and AWS-LC are C; compile them against musl headers, not glibc's.
+          echo "CC_$(printf '%s' "$TARGET" | tr '-' '_')=musl-gcc" >> "$GITHUB_ENV"
+      # Main builds reuse cached dependencies. Publishing builds skip the cache, so a published
+      # binary never depends on a cache written by an earlier run.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: ${{ github.event_name == 'push' }}
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Stamp the preview version
+        if: ${{ contains(needs.plan.outputs.version, '-') }}
+        run: |
+          sed "/^\[workspace\.package\]/,/^\[/s/^version = \".*\"$/version = \"$VERSION\"/" Cargo.toml > Cargo.toml.new
+          mv Cargo.toml.new Cargo.toml
+          cargo update --workspace
+          # Only the six workspace crates may change; every third-party dependency stays locked.
+          test "$(git diff --numstat Cargo.lock)" = "$(printf '6\t6\tCargo.lock')"
+      - run: cargo build --locked --release -p cocoa --bin cocoa --target "$TARGET"
+      - name: Package
+        env:
+          # Keeps macOS tar from adding AppleDouble ._ entries.
+          COPYFILE_DISABLE: 1
+        run: |
+          name="cocoa-$TARGET"
+          mkdir -p "staging/$name" dist
+          install -m 0755 "target/$TARGET/release/cocoa" "staging/$name/cocoa"
+          install -m 0644 LICENSE README.md "staging/$name/"
+          tar -C staging -czf "dist/$name.tar.gz" "$name"
+          tar -tvzf "dist/$name.tar.gz"
+      - name: Smoke test
+        # macos-15 is arm64 and cannot be assumed to run x86_64 code.
+        if: ${{ matrix.target != 'x86_64-apple-darwin' }}
+        run: |
+          test "$("staging/cocoa-$TARGET/cocoa" --version)" = "cocoa $VERSION"
+          if [ "$RUNNER_OS" = Linux ]; then
+            file "staging/cocoa-$TARGET/cocoa" | grep -Eq 'static(ally|-pie) linked'
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cocoa-${{ matrix.target }}
+          path: dist/cocoa-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Required reviewers on this environment decide who may publish.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cocoa-*
+          path: dist
+          merge-multiple: true
+      - name: Add the installer and checksums
+        run: |
+          install -m 0644 install.sh dist/install.sh
+          cd dist
+          sha256sum cocoa-*.tar.gz > sha256.sum
+          cat sha256.sum
+          test "$(wc -l < sha256.sum)" -eq 4
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/cocoa-*.tar.gz
+            dist/install.sh
+      - name: Publish the release and create its tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          prerelease=()
+          case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+          # Upload everything to a draft first, then publish. Publishing creates the tag at the
+          # built commit, and immutable releases lock the tag and assets from then on.
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --draft \
+            "${prerelease[@]}" \
+            --title "$TAG" \
+            --generate-notes
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -1,0 +1,60 @@
+[package]
+name = "cocoa"
+description = "A terminal coding agent with a private JavaScript REPL"
+default-run = "cocoa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+
+[dependencies]
+arboard.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+cocoa-core = { path = "../cocoa-core" }
+cocoa-llm = { path = "../cocoa-llm" }
+cocoa-oauth = { path = "../cocoa-oauth" }
+cocoa-quickjs = { path = "../cocoa-quickjs" }
+cocoa-tools = { path = "../cocoa-tools" }
+clap = { workspace = true, features = ["derive"] }
+crossterm = { workspace = true, features = ["use-dev-tty", "osc52"] }
+diffy.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+ignore.workspace = true
+image.workspace = true
+miniz_oxide.workspace = true
+pulldown-cmark.workspace = true
+ratatui = { workspace = true, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
+ratatui-textarea = { workspace = true, features = ["crossterm"] }
+reqwest = { workspace = true, features = ["rustls", "json", "stream"] }
+roxmltree.workspace = true
+secrecy.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+sha2.workspace = true
+similar = { workspace = true, features = ["inline", "unicode"] }
+sqlx.workspace = true
+syntect = { workspace = true, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+tui-markdown.workspace = true
+unicode-segmentation.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+rquickjs.workspace = true
+wiremock.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["std", "termios", "fs", "process", "pty", "event"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,54 @@
+#!/bin/bash
+
+set -eu
+cd -- "$(dirname -- "$0")/.."
+
+if [ "${1-}" = --doc ]; then
+    shift
+    exec cargo test --locked --doc "$@"
+fi
+
+if ! cargo nextest --version > /dev/null 2>&1; then
+    echo 'Install cargo-nextest with: cargo install cargo-nextest --version 0.9.143 --locked' >&2
+    exit 1
+fi
+
+arguments=(--locked --no-tests=fail "$@")
+build_arguments=(--locked)
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h|--help)
+            exec cargo nextest run --help
+            ;;
+        --)
+            break
+            ;;
+        --cargo-profile|--build-jobs|--target|--target-dir|--features|-F|--config|--manifest-path|-Z)
+            if [ "$#" -lt 2 ]; then
+                echo "Missing value for $1" >&2
+                exit 2
+            fi
+            option=$1
+            case "$option" in
+                --cargo-profile) option=--profile ;;
+                --build-jobs) option=--jobs ;;
+            esac
+            build_arguments+=("$option" "$2")
+            shift
+            ;;
+        --cargo-profile=*)
+            build_arguments+=("--profile=${1#*=}")
+            ;;
+        --build-jobs=*)
+            build_arguments+=("--jobs=${1#*=}")
+            ;;
+        -r|--release|--all-features|--no-default-features|--frozen|--offline|--ignore-rust-version|--target=*|--target-dir=*|--features=*|-F?*|--config=*|--manifest-path=*|-Z?*)
+            build_arguments+=("$1")
+            ;;
+    esac
+    shift
+done
+
+# Process-level tests launch examples beside the selected test binaries.
+cargo build -p cocoa --example terminal_fixture --example mock_llm "${build_arguments[@]}"
+exec cargo nextest run "${arguments[@]}"
