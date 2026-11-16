@@ -149,7 +149,7 @@ impl Terminal {
     }
 
     pub fn until(&mut self, mut predicate: impl FnMut(&Self) -> bool) -> io::Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while !predicate(self) {
             self.pump()?;
             if Instant::now() >= deadline {

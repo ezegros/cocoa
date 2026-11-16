@@ -2049,7 +2049,7 @@ fn aliases_manage_model_choices_and_select_a_default() -> io::Result<()> {
         99
     );
     session.key(b"\x1b[F\x1b[A\r")?;
-    session.wait_text("night › Model")?;
+    session.wait_text("No saved model. Choose one below.")?;
     session.command("fixture-model")?;
     session.wait_text("night › Priority")?;
     session.key(b"\x15")?;
@@ -2916,7 +2916,7 @@ impl Homes {
                     "medium":[{"provider":"openai","model":"fixture","priority":0}],
                     "switched":[{"provider":"openai","model":"switched-model","priority":0}]
                 },
-                "default_alias":"medium","timeout_ms":timeout_ms
+                "default_alias":"medium","timeout_ms":timeout_ms,"settlement_timeout_ms":30_000
             }),
             false,
         )?;
