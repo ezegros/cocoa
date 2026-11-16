@@ -810,7 +810,7 @@ async fn failed_compaction_keeps_the_session_and_can_retry_without_repeating_eff
                 30,
                 None,
             )?;
-            session.wait_text("Session resumed")?;
+            session.wait_text(" medium ")?;
         }
         assert_eq!(
             fs::read_to_string(home.path().join("effect.txt"))?,
@@ -1025,7 +1025,7 @@ async fn resumed_alias_adopts_current_request_policy_without_changing_saved_exec
         30,
         None,
     )?;
-    resumed.wait_text("Session resumed")?;
+    resumed.wait_text(" medium ")?;
     resumed.command("Continue with current compaction policy")?;
     finish_answer(&mut resumed, "resumed compaction verified")?;
     server
@@ -1596,7 +1596,7 @@ async fn startup_fallback_orders_root_and_child_choices_and_pins_resume()
         30,
         None,
     )?;
-    resumed.wait_text("Session resumed")?;
+    resumed.wait_text("medium · root-fallback (high)")?;
     resumed.command("Continue after resume")?;
     finish_answer(&mut resumed, "resumed fallback verified")?;
     server

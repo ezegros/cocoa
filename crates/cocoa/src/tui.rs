@@ -48,7 +48,6 @@ use tokio_util::sync::CancellationToken;
 const ALIAS_LOCKED_NOTICE: &str =
     "Alias and model are fixed for this session. Start a new session to change them.";
 const REWIND_NOTICE: &str = "Rewound into a new session before the selected prompt. Files are unchanged. JavaScript bindings and handles are reset. Shared context and child agents are not copied. The original session is preserved.";
-const RESUME_NOTICE: &str = "Session resumed. History and shared context survived. Earlier JavaScript bindings, observations, handles and process supervision are unavailable. External effects may remain. Read current state again before mutations.";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{reason}{}{}{}", if .shutdown.is_some() { "; shutdown failed" } else { "" }, if .restore.is_some() { "; terminal restoration failed" } else { "" }, if .display.is_some() { "; stopped view failed" } else { "" })]
@@ -191,7 +190,6 @@ pub(crate) async fn run(
             chat.restore_transcript(&target.records);
             show_selection(chat, &label, &target.model_label, thinking_level);
             if let Some(attachment) = &target.attachment { chat.notice(&format!("Session {}", attachment.public_id())); }
-            chat.notice(RESUME_NOTICE);
             if target.relocated { chat.notice(&format!("Session relocated to {}", target.directory.display())); }
             if let Some(active) = target.session.as_ref() {
                 chat.set_input_bytes(active.input_bytes)?;
@@ -558,7 +556,6 @@ async fn session(
                             }
                             if matches!(action, config::SessionAction::Resume(_)) {
                                 if let Some(attachment) = &target.attachment { chat.notice(&format!("Session {}", attachment.public_id())); }
-                                chat.notice(RESUME_NOTICE);
                             }
                             if target.relocated { chat.notice(&format!("Session relocated to {}", working_directory.display())); }
                             if let Some(active) = &target.session { commands.mcp = Some(active.mcp.clone()); chat.set_message_steering(active.message_steering); }

@@ -274,9 +274,10 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     assert_eq!(server.requests()?.len(), 2);
 
     let mut resumed = Terminal::spawn(&home, &["resume", &identity], 110, 36, None)?;
-    resumed.wait_text("Session resumed.")?;
+    resumed.wait_text(&format!("Session {identity}"))?;
     resumed.wait_text("root-sentinel first conversation")?;
     resumed.wait_text("Work Done")?;
+    assert!(!resumed.contains("Session resumed"));
     capture_session_view(&mut resumed, "resumed-transcript")?;
     resumed.key(b"\t")?;
     resumed.key(b"\x1b[C")?;
@@ -348,13 +349,14 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     fs::write(&configuration_path, &original)?;
 
     let mut locked = Terminal::spawn(&home, &["resume", &identity], 110, 36, None)?;
-    locked.wait_text("Session resumed.")?;
+    locked.wait_text(&format!("Session {identity}"))?;
     resumed.command(&format!("/resume {identity}"))?;
     resumed.wait_text("another attachment owns this session")?;
     assert!(resumed.contains("answer-6"));
     close_command_session(&mut locked)?;
     resumed.command(&format!("/resume {}", &identity[..13]))?;
-    resumed.wait_text("Session resumed.")?;
+    resumed.wait_text(&format!("Session {identity}"))?;
+    assert!(!resumed.contains("Session resumed"));
     assert!(resumed.contains("root-sentinel first conversation"));
     assert!(!resumed.contains("other conversation"));
     assert_eq!(server.requests()?.len(), 6);
@@ -371,7 +373,7 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     assert!(!resumed.contains(&home.to_string_lossy()));
     capture_session_view(&mut resumed, "session-picker-narrow")?;
     resumed.key(b"\x1b")?;
-    resumed.wait_text("Session resumed.")?;
+    resumed.wait_text(&format!("Session {identity}"))?;
     assert_eq!(
         session_page(&home, None)?["sessions"]
             .as_array()
@@ -515,7 +517,7 @@ async fn resume_picker_last_and_relocation_never_create_a_conversation() -> io::
         None,
     )?;
     scoped.wait_text(&local_id)?;
-    scoped.wait_text("Session resumed.")?;
+    scoped.wait_text(&format!("Session {local_id}"))?;
     close_command_session(&mut scoped)?;
     let moved = home.join("moved-project");
     fs::rename(&old_directory, &moved)?;
@@ -1638,7 +1640,7 @@ fn explicit_thinking_levels_reach_explicit_model_requests() -> io::Result<()> {
     assert_eq!(fs::read(&path)?, before);
 
     let mut resumed = Terminal::spawn(&home, &["resume", "--last"], 100, 28, None)?;
-    resumed.wait_text("Session resumed")?;
+    resumed.wait_text("org/initial-model")?;
     assert_eq!(server.requests()?.len(), 1);
     resumed.command("continue with explicit thinking")?;
     resumed.wait_text("answer-2")?;
@@ -2164,7 +2166,7 @@ fn alias_choices_keep_distinct_efforts_when_cycling_and_resuming() -> io::Result
     session.wait_text("answer-1")?;
     close_command_session(&mut session)?;
     let mut resumed = Terminal::spawn(&home, &["resume", "--last"], 90, 28, None)?;
-    resumed.wait_text("Session resumed")?;
+    resumed.wait_text("same-model (high)")?;
     resumed.command("continue at high effort")?;
     resumed.wait_text("answer-2")?;
     close_command_session(&mut resumed)?;
@@ -2225,7 +2227,6 @@ fn startup_fallback_updates_the_pinned_model_and_effort_during_work_and_after_re
         session.wait_text(&format!("medium · {model} (high)"))?;
         close_command_session(&mut session)?;
         let mut resumed = Terminal::spawn(&home, &["resume", "--last"], 110, 30, None)?;
-        resumed.wait_text("Session resumed")?;
         resumed.wait_text(&format!("medium · {model} (high)"))?;
         capture_session_view(&mut resumed, &format!("alias-{model}-resumed"))?;
         resumed.command("continue after resume")?;
