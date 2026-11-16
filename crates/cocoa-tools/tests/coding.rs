@@ -32,6 +32,10 @@ use tokio_util::sync::CancellationToken;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+/// Result previews embed the absolute path, so the temp directory alone cannot
+/// decide whether a preview exceeds `work(130)`; this name always makes it exceed.
+const LONG_NAME: &str = "long-file-name-that-keeps-every-result-preview-above-the-work-budget";
+
 struct Fixture {
     directory: TempDir,
     environment: Arc<LocalEnvironment>,
@@ -1116,9 +1120,9 @@ async fn normalized_edits_reserve_file_observation_and_response_capacity_before_
         ..limits()
     })
     .await?;
-    let path = fixture.directory.path().join("bounded");
+    let path = fixture.directory.path().join(LONG_NAME);
     fs::write(&path, "abcdefghijklmnop")?;
-    let read = fixture.read("bounded").await?;
+    let read = fixture.read(LONG_NAME).await?;
     for replacement in ["123456789", "012345678901234567890"] {
         failure(fixture.call("cocoa.edit", json!({"file":read["file"],"edits":[{"old_text":"abcdefghijklmnop","new_text":replacement}]})).await, "capacity", Effects::None);
         assert_eq!(fs::read_to_string(&path)?, "abcdefghijklmnop");
@@ -1473,7 +1477,8 @@ async fn stale_absence_and_changed_inode_or_bytes_never_clobber() -> TestResult 
 async fn missing_targets_create_parents_only_after_reserving_capacity_and_report_partial_effects()
 -> TestResult {
     let fixture = Fixture::new(limits()).await?;
-    let missing = fixture.read("new/nested/leaf").await?;
+    let leaf = format!("new/nested/{LONG_NAME}");
+    let missing = fixture.read(&leaf).await?;
     assert_eq!(missing["kind"], "missing");
     assert!(!fixture.directory.path().join("new").exists());
     let small = fixture
@@ -1513,7 +1518,7 @@ async fn missing_targets_create_parents_only_after_reserving_capacity_and_report
         .await?;
     assert!(created.get("page").is_none());
     assert_eq!(
-        fs::read(fixture.directory.path().join("new/nested/leaf"))?,
+        fs::read(fixture.directory.path().join(&leaf))?,
         "λ\r\nlast".as_bytes()
     );
     assert_eq!(
@@ -1525,7 +1530,7 @@ async fn missing_targets_create_parents_only_after_reserving_capacity_and_report
             .await?["kind"],
         "missing"
     );
-    fs::remove_file(fixture.directory.path().join("new/nested/leaf"))?;
+    fs::remove_file(fixture.directory.path().join(&leaf))?;
     failure(
         fixture
             .call(
@@ -1536,7 +1541,7 @@ async fn missing_targets_create_parents_only_after_reserving_capacity_and_report
         "stale_read",
         Effects::None,
     );
-    assert!(!fixture.directory.path().join("new/nested/leaf").exists());
+    assert!(!fixture.directory.path().join(&leaf).exists());
 
     let path = format!("partial/{}/leaf", "x".repeat(256));
     let missing = fixture.read(&path).await?;
@@ -1587,8 +1592,8 @@ async fn quotas_and_result_capacity_fail_before_mutation_and_leave_no_partial_fi
         ..limits()
     })
     .await?;
-    fs::write(fixture.directory.path().join("source"), "abcdefghijklmnop")?;
-    let original = fixture.read("source").await?;
+    fs::write(fixture.directory.path().join(LONG_NAME), "abcdefghijklmnop")?;
+    let original = fixture.read(LONG_NAME).await?;
     failure(
         fixture
             .call(
@@ -1600,7 +1605,7 @@ async fn quotas_and_result_capacity_fail_before_mutation_and_leave_no_partial_fi
         Effects::None,
     );
     assert_eq!(
-        fs::read_to_string(fixture.directory.path().join("source"))?,
+        fs::read_to_string(fixture.directory.path().join(LONG_NAME))?,
         "abcdefghijklmnop"
     );
     failure(
@@ -1624,7 +1629,7 @@ async fn quotas_and_result_capacity_fail_before_mutation_and_leave_no_partial_fi
         .await;
     assert!(matches!(small, Err(CapabilityError::OutputLimit)));
     assert_eq!(
-        fs::read_to_string(fixture.directory.path().join("source"))?,
+        fs::read_to_string(fixture.directory.path().join(LONG_NAME))?,
         "abcdefghijklmnop"
     );
     assert!(

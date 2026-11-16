@@ -565,8 +565,7 @@ async fn report_capture_validates_unprinted_work_and_retains_output_after_cleanu
     let version = String::from_utf8(version.stdout)?;
     let version = version
         .lines()
-        .next()
-        .and_then(|line| line.strip_prefix("cargo-nextest "))
+        .find_map(|line| line.strip_prefix("release: "))
         .ok_or("nextest version")?;
     let contract = json!({"schema_version":1,"run_id":run_id,"participants":{
         "root":{"cells_max":1,"answer_chars_max_exclusive":100,"expected_status":"completed"},
