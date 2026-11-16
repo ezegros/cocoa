@@ -61,6 +61,7 @@ mod anthropic;
 mod chat_completions;
 pub mod openai;
 mod responses;
+mod tokens;
 mod transport;
 
 use std::{fmt, str::FromStr, sync::Arc};
@@ -69,7 +70,7 @@ use async_trait::async_trait;
 use cocoa_core::{
     model::{
         ModelAction, ModelError, ModelProvider, ModelRequest, ModelResponse, RequestAccounting,
-        SummaryRequest,
+        RequestTokenBudget, SummaryRequest,
     },
     store::RecordKind,
 };
@@ -85,10 +86,51 @@ pub const DECODER_BYTES: usize = 64 * 1024 * 1024;
 
 /// Model metadata supplied by the application, without provider discovery.
 /// Missing output metadata uses 32,000 tokens. Present values must be positive.
-/// The provider enforces its context window.
+/// Missing context metadata uses a 128,000-token host budget,
+/// not a claim about the provider's actual window.
+/// Admission reserves the output ceiling for generation, capped at half the
+/// window, and each request's generation cap is fitted to the remaining window.
+/// ChatGPT omits the unsupported generation cap.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ModelLimits {
     pub output_tokens: Option<u32>,
+    pub context_tokens: Option<u32>,
+}
+
+impl ModelLimits {
+    pub(crate) fn output_limit(self) -> u32 {
+        self.output_tokens.unwrap_or(32_000)
+    }
+
+    pub(crate) fn context_limit(self) -> u32 {
+        self.context_tokens.unwrap_or(128_000)
+    }
+
+    pub(crate) fn generation_reserve(self) -> u32 {
+        self.output_limit().min(self.context_limit().div_ceil(2))
+    }
+
+    pub(crate) fn input_limit(self) -> u64 {
+        u64::from(self.context_limit() - self.generation_reserve())
+    }
+
+    pub(crate) fn fit_output(self, input_tokens: u64) -> Result<Self, ModelError> {
+        let input_limit = self.input_limit();
+        if input_tokens > input_limit {
+            return Err(ModelError::ContextLimit {
+                input_tokens,
+                input_limit,
+            });
+        }
+        let remaining = u64::from(self.context_limit()) - input_tokens;
+        Ok(Self {
+            output_tokens: Some(
+                self.output_limit()
+                    .min(u32::try_from(remaining).unwrap_or(u32::MAX)),
+            ),
+            ..self
+        })
+    }
 }
 
 /// Backend identity, including the protocol and replay rules owned by that backend.
@@ -533,12 +575,13 @@ impl Provider {
         self.inner.enable_reasoning_summary()
     }
 
-    /// Use exact model metadata for the generation token limit.
+    /// Set positive model output ceilings and context-window metadata.
+    /// Missing values use the host defaults documented by [`ModelLimits`].
     ///
     /// # Errors
-    /// Reject zero token limits. Missing output metadata uses 32,000 tokens.
+    /// Reject zero token limits.
     pub fn set_model_limits(&mut self, limits: ModelLimits) -> Result<(), ProviderError> {
-        if limits.output_tokens == Some(0) {
+        if limits.output_tokens == Some(0) || limits.context_tokens == Some(0) {
             return Err(ProviderError::InvalidOptions);
         }
         self.inner.model_limits = limits;
@@ -589,6 +632,13 @@ impl ModelProvider for Provider {
 
     fn request_bytes(&self, request: &ModelRequest) -> Result<Option<usize>, ModelError> {
         self.inner.request_bytes(request)
+    }
+
+    fn request_token_budget(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<RequestTokenBudget>, ModelError> {
+        self.inner.request_token_budget(request)
     }
 
     async fn summarize(

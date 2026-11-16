@@ -230,7 +230,9 @@ impl AccountedRequest {
     pub async fn finish<T>(&mut self, result: &Result<T, ModelError>) -> Result<(), ModelError> {
         self.latest.outcome = Some(match result {
             Ok(_) => RequestOutcome::Completed,
-            Err(ModelError::Rejected { .. }) => RequestOutcome::Rejected,
+            Err(ModelError::Rejected { .. } | ModelError::ContextLimit { .. }) => {
+                RequestOutcome::Rejected
+            }
             Err(ModelError::Transport { .. }) => RequestOutcome::Transport,
             Err(ModelError::Protocol { .. }) => RequestOutcome::Protocol,
             Err(ModelError::Stalled) => RequestOutcome::Stalled,

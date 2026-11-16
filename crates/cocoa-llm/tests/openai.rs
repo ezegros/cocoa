@@ -3652,8 +3652,13 @@ async fn large_responses_continuations_and_prompts_survive_without_feedback_quot
             .await;
         let mut options = profile_options(kind, &server.uri());
         options.execution = ExecutionMode::Disabled;
+        let mut provider = Provider::new(options)?;
+        provider.set_model_limits(ModelLimits {
+            output_tokens: None,
+            context_tokens: Some(16_000_000),
+        })?;
         let model = RequestControl {
-            inner: Provider::new(options)?,
+            inner: provider,
             output_bytes: 1,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
@@ -3690,11 +3695,13 @@ async fn large_responses_continuations_and_prompts_survive_without_feedback_quot
         ))
         .mount(&server)
         .await;
+    let mut provider = Provider::new(profile_options(ProviderKind::OpenAi, &server.uri()))?;
+    provider.set_model_limits(ModelLimits {
+        output_tokens: None,
+        context_tokens: Some(16_000_000),
+    })?;
     let model = RequestControl {
-        inner: provider(
-            format!("{}/v1/responses", server.uri()),
-            ExecutionMode::Disabled,
-        )?,
+        inner: provider,
         output_bytes: 65536,
         timeout: Duration::from_secs(30),
         cancellation: CancellationToken::new(),
@@ -3739,8 +3746,13 @@ async fn shared_snapshots_remain_inside_the_encoded_request_byte_safeguard()
             .await;
         let mut options = profile_options(kind, &server.uri());
         options.execution = ExecutionMode::Disabled;
+        let mut provider = Provider::new(options)?;
+        provider.set_model_limits(ModelLimits {
+            output_tokens: None,
+            context_tokens: Some(32_000_000),
+        })?;
         let model = RequestControl {
-            inner: Provider::new(options)?,
+            inner: provider,
             output_bytes: 1,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
@@ -3814,9 +3826,13 @@ async fn every_profile_requests_model_output_tokens_with_fallback() -> Result<()
         ProviderKind::Meta,
         ProviderKind::Groq,
     ] {
-        for (output_tokens, expected) in
-            [(None, 32_000), (Some(96_000), 96_000), (Some(1700), 1700)]
-        {
+        for (context_tokens, output_tokens, expected) in [
+            (None, None, 32_000),
+            (None, Some(96_000), 96_000),
+            (None, Some(1700), 1700),
+            (Some(200_000), Some(96_000), 96_000),
+            (Some(100_000), None, 32_000),
+        ] {
             let server = MockServer::start().await;
             let response = if kind == ProviderKind::Ollama {
                 chat_chunk(json!({"content":"tokens configured"}), Value::Null)
@@ -3837,11 +3853,15 @@ async fn every_profile_requests_model_output_tokens_with_fallback() -> Result<()
             assert!(
                 provider
                     .set_model_limits(ModelLimits {
-                        output_tokens: Some(0)
+                        output_tokens: Some(0),
+                        context_tokens: None,
                     })
                     .is_err()
             );
-            provider.set_model_limits(ModelLimits { output_tokens })?;
+            provider.set_model_limits(ModelLimits {
+                output_tokens,
+                context_tokens,
+            })?;
             let model = RequestControl {
                 inner: provider,
                 output_bytes: 1,
@@ -4432,6 +4452,7 @@ async fn chatgpt_renews_credentials_and_replays_namespaced_exec_without_api_fiel
     let mut provider = fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?;
     provider.set_model_limits(ModelLimits {
         output_tokens: Some(17),
+        context_tokens: None,
     })?;
     let snapshots = vec![
         Some(shared_snapshot(json!("subscription initial snapshot"), 5)?),
@@ -4521,6 +4542,323 @@ async fn chatgpt_renews_credentials_and_replays_namespaced_exec_without_api_fiel
     );
     engine.shutdown().await?;
     fixture.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn chatgpt_compacts_and_continues_with_namespaced_execution() -> Result<(), Box<dyn Error>> {
+    use cocoa_core::compaction::{CheckpointLimits, CompactionPolicy};
+
+    let fixture = SubscriptionFixture::new().await?;
+    let mut execution = call(1, "7 * 3 + 2");
+    execution["namespace"] = json!("cocoa");
+    let mut thought = reasoning();
+    thought["encrypted_content"] = json!("x".repeat(16 * 1024));
+    let proposal = json!({
+        "additions":[],"changes":[],"evidence":[],
+        "recap":{"goal":"Keep calculating","stages":[],"current_stage":null,
+            "decisions":[],"progress":[],"failures":[],"next_actions":[]}
+    })
+    .to_string();
+    for output in [
+        json!([thought, execution]),
+        json!([message(&proposal)]),
+        json!([message("compacted answer")]),
+    ] {
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(event(completed(output)), "text/event-stream"),
+            )
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&fixture.server)
+            .await;
+    }
+    let limits = Limits {
+        input_bytes: 4096,
+        output_bytes: 65536,
+        record_bytes: 128 * 1024,
+        context_bytes: 1024 * 1024,
+        pending_operations: 2,
+        stall_timeout: Duration::from_secs(5),
+        settlement_timeout: Duration::from_millis(100),
+        shutdown_timeout: Duration::from_millis(100),
+    };
+    let store = Arc::new(InMemoryStore::new(StoreLimits {
+        record_bytes: limits.record_bytes,
+    })?);
+    let mut engine = Engine::new(
+        EngineSettings::new(limits)?.with_compaction(CompactionPolicy {
+            request_bytes: 16 * 1024,
+            trigger_bytes: 12 * 1024,
+            target_bytes: 8 * 1024,
+            summary_input_bytes: 128 * 1024,
+            summary_output_tokens: 73,
+            sources: 32,
+            checkpoint: CheckpointLimits {
+                bytes: 4096,
+                required_entries: 8,
+                items: 8,
+            },
+            timeout: Duration::from_secs(5),
+        })?,
+        EngineAdapters {
+            model: Arc::new(fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?),
+            executor: Box::new(ArithmeticExecutor),
+            capabilities: Arc::new(NoCapabilities),
+            context: Arc::new(BoundedContext),
+            store: store.clone(),
+        },
+        None,
+    );
+    assert_eq!(
+        engine
+            .run(
+                RunRequest {
+                    input: "calculate".into(),
+                },
+                CancellationToken::new(),
+            )
+            .await?
+            .answer,
+        "compacted answer"
+    );
+    engine.shutdown().await?;
+    let requests = fixture
+        .server
+        .received_requests()
+        .await
+        .ok_or("missing requests")?;
+    assert_eq!(requests.len(), 3);
+    let summary: Value = requests[1].body_json()?;
+    assert!(summary.get("max_output_tokens").is_none());
+    assert!(summary.get("tools").is_none());
+    assert_eq!(
+        summary["instructions"],
+        cocoa_core::compaction::SUMMARY_INSTRUCTIONS
+    );
+    assert_eq!(requests[1].headers["authorization"], "Bearer renewed-1");
+    let continued: Value = requests[2].body_json()?;
+    assert!(continued.to_string().contains("checkpoint_projection"));
+    assert!(requests[2].body.len() < 16 * 1024);
+    assert_eq!(continued["tools"][0]["name"], "cocoa");
+    let snapshot = cocoa_core::store::Store::load(store.as_ref()).await?;
+    assert_eq!(snapshot.checkpoints.len(), 1);
+    snapshot.validate_checkpoints()?;
+    assert!(serde_json::to_string(&snapshot.records)?.contains(&"x".repeat(16 * 1024)));
+    fixture.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn chatgpt_token_windows_survive_resume_and_do_not_count_ciphertext()
+-> Result<(), Box<dyn Error>> {
+    use cocoa_core::{
+        compaction::{CheckpointLimits, CompactionPolicy},
+        store::Store,
+    };
+
+    for (input_tokens, goal, succeeds, compacted) in [
+        (17_000, None, true, false),
+        (440_000, None, true, false),
+        (450_000, Some("Keep calculating".to_owned()), true, true),
+        (460_000, None, true, false),
+        (470_000, None, false, false),
+        (470_000, Some("x".repeat(1_410_000)), false, false),
+    ] {
+        let fixture = SubscriptionFixture::new().await?;
+        let mut thought = reasoning();
+        thought["encrypted_content"] = json!("x".repeat(2 * 1024 * 1024));
+        let mut seed = completed(json!([thought, message("seed saved")]));
+        seed["response"]["usage"]["input_tokens"] = json!(input_tokens);
+        let proposal = json!({
+            "additions":[],"changes":[],"evidence":[],
+            "recap":{"goal":goal,"stages":[],"current_stage":null,
+                "decisions":[],"progress":[],"failures":[],"next_actions":[]}
+        })
+        .to_string();
+        let mut replies = vec![seed];
+        let summary_attempted = input_tokens >= 450_000;
+        if summary_attempted {
+            replies.push(completed(json!([message(if goal.is_some() {
+                &proposal
+            } else {
+                "{}"
+            })])));
+        }
+        if succeeds {
+            replies.push(completed(json!([message("continued")])))
+        }
+        let requests_expected = replies.len();
+        for reply in replies {
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_raw(event(reply), "text/event-stream"),
+                )
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(&fixture.server)
+                .await;
+        }
+        let limits = Limits {
+            input_bytes: 4096,
+            output_bytes: 65536,
+            record_bytes: 4 * 1024 * 1024,
+            context_bytes: 16 * 1024 * 1024,
+            pending_operations: 2,
+            stall_timeout: Duration::from_secs(5),
+            settlement_timeout: Duration::from_millis(100),
+            shutdown_timeout: Duration::from_millis(100),
+        };
+        let policy = CompactionPolicy {
+            request_bytes: 16 * 1024 * 1024,
+            trigger_bytes: 12 * 1024 * 1024,
+            target_bytes: 8 * 1024 * 1024,
+            summary_input_bytes: 128 * 1024,
+            summary_output_tokens: 8192,
+            sources: 32,
+            checkpoint: CheckpointLimits {
+                bytes: 2 * 1024 * 1024,
+                required_entries: 8,
+                items: 8,
+            },
+            timeout: Duration::from_secs(5),
+        };
+        let store = Arc::new(InMemoryStore::new(StoreLimits {
+            record_bytes: limits.record_bytes,
+        })?);
+        let mut provider = fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?;
+        provider.set_model_limits(ModelLimits {
+            context_tokens: Some(500_000),
+            output_tokens: None,
+        })?;
+        let provider = Arc::new(provider);
+        let adapters = || EngineAdapters {
+            model: provider.clone(),
+            executor: Box::new(NoExecution),
+            capabilities: Arc::new(NoCapabilities),
+            context: Arc::new(BoundedContext),
+            store: store.clone(),
+        };
+        let mut engine = Engine::new(
+            EngineSettings::new(limits)?.with_compaction(policy)?,
+            adapters(),
+            None,
+        );
+        assert_eq!(
+            engine
+                .run(
+                    RunRequest {
+                        input: "calculate".into()
+                    },
+                    CancellationToken::new()
+                )
+                .await?
+                .answer,
+            "seed saved"
+        );
+        engine.shutdown().await?;
+        let mut engine = Engine::resume(
+            EngineSettings::new(limits)?.with_compaction(policy)?,
+            adapters(),
+            None,
+        )
+        .await?;
+        let result = engine
+            .run(
+                RunRequest {
+                    input: "continue".into(),
+                },
+                CancellationToken::new(),
+            )
+            .await;
+        if succeeds {
+            assert_eq!(result?.answer, "continued", "input tokens: {input_tokens}");
+        } else {
+            assert!(matches!(result, Err(RunError::Compaction(_))), "{result:?}");
+        }
+        engine.shutdown().await?;
+        let requests = fixture
+            .server
+            .received_requests()
+            .await
+            .ok_or("missing requests")?;
+        assert_eq!(requests.len(), requests_expected);
+        if summary_attempted {
+            let summary: Value = requests[1].body_json()?;
+            assert_eq!(
+                summary["instructions"],
+                cocoa_core::compaction::SUMMARY_INSTRUCTIONS
+            );
+            assert!(requests[1].body.len() < 128 * 1024);
+        }
+        if succeeds {
+            let last = requests.last().ok_or("missing continuation")?;
+            assert_eq!(
+                String::from_utf8_lossy(&last.body).contains("checkpoint_projection"),
+                compacted
+            );
+            if !compacted {
+                assert!(last.body.len() > 2 * 1024 * 1024);
+            }
+        }
+        let snapshot = store.load().await?;
+        assert_eq!(snapshot.checkpoints.len(), usize::from(compacted));
+        snapshot.validate_checkpoints()?;
+        assert!(snapshot.records.iter().any(|stored| matches!(
+            &stored.record.kind, RecordKind::InputAccepted { input } if input.text() == "calculate"
+        )));
+        fixture.shutdown().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn chatgpt_summaries_are_read_only_and_byte_bounded() -> Result<(), Box<dyn Error>> {
+    for (output, output_bytes, error) in [
+        (json!([message("é")]), 2, None),
+        (
+            json!([message("é")]),
+            1,
+            Some("response byte limit: stage=output_text observed_bytes_at_least=2 limit_bytes=1"),
+        ),
+        (
+            json!([call(1, "7 * 3 + 2")]),
+            4096,
+            Some("execution disabled"),
+        ),
+    ] {
+        let fixture = SubscriptionFixture::new().await?;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(event(completed(output)), "text/event-stream"),
+            )
+            .expect(1)
+            .mount(&fixture.server)
+            .await;
+        let provider = fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?;
+        let result = provider
+            .summarize(
+                cocoa_core::model::SummaryRequest {
+                    input: "portable evidence".into(),
+                    output_tokens: 73,
+                    output_bytes,
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(5),
+                },
+                CancellationToken::new(),
+            )
+            .await;
+        match error {
+            None => assert_eq!(result?, "é"),
+            Some(expected) => assert!(
+                matches!(result, Err(ModelError::Protocol { ref message }) if message == expected),
+                "unexpected summary result: {result:?}"
+            ),
+        }
+        fixture.shutdown().await?;
+    }
     Ok(())
 }
 

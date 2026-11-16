@@ -709,6 +709,7 @@ async fn session(
                                     show_pinned_selection(chat, &directory_label, attachment).await;
                                     let reason = match failure.error {
                                         ModelError::Transport { message } | ModelError::Rejected { message } => format!("{message}. Retry or cancel this turn."),
+                                        ModelError::ContextLimit { input_tokens, input_limit } => format!("Input needs {input_tokens} tokens but the context budget allows {input_limit}. The request was not sent. Cancel this turn to change the model or input."),
                                         ModelError::Protocol { .. } => "Provider returned an invalid response. Try again or cancel this turn.".into(),
                                         ModelError::Stalled => "Provider response timed out. Try again or cancel this turn.".into(),
                                         ModelError::Cancelled => unreachable!("cancelled requests do not ask for retry"),
@@ -815,7 +816,7 @@ async fn session(
                                 }
                                 observations(chat, receiver, &mut dirty).await;
                                 events = None;
-                                if matches!(&error, RunError::Deadline { .. }) {
+                                if matches!(&error, RunError::Deadline { .. } | RunError::Compaction(_)) {
                                     let reference = attachment
                                         .as_ref()
                                         .map(|attachment| attachment.public_id().to_string());
@@ -840,6 +841,8 @@ async fn session(
                                                     commands.status = Status::Idle;
                                                 }
                                                 Err(SwitchError::Setup(error)) if error.cleanup_unconfirmed() => return Err(SessionError::Recovery(Box::new(error))),
+                                                // Resetting here would detach the conversation retained after failed compaction.
+                                                Err(failure) if matches!(&error, RunError::Compaction(_)) => return Err(SessionError::Switch(Box::new(failure))),
                                                 Err(failure) => {
                                                     chat.input_notice(&failure.to_string());
                                                     *attachment = None;

@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use async_trait::async_trait;
 use cocoa::persistence::SqliteStore;
 use cocoa_core::model::{
-    ModelError, ModelProvider, ModelRequest, ModelResponse, RequestAccounting, SummaryRequest,
+    ModelError, ModelProvider, ModelRequest, ModelResponse, RequestAccounting, RequestTokenBudget,
+    SummaryRequest,
 };
 use cocoa_llm::{ExecutionMode, Provider, ProviderKind, ProviderOptions};
 use tokio_util::sync::CancellationToken;
@@ -106,6 +107,13 @@ impl ModelProvider for StartupModel {
 
     fn request_bytes(&self, request: &ModelRequest) -> Result<Option<usize>, ModelError> {
         self.current().provider.request_bytes(request)
+    }
+
+    fn request_token_budget(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<RequestTokenBudget>, ModelError> {
+        self.current().provider.request_token_budget(request)
     }
 
     async fn summarize(

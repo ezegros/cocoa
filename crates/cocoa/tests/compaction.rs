@@ -829,6 +829,7 @@ fn effective_settings() -> EffectiveSessionSettings {
                 thinking_level: None,
                 reasoning_summary: false,
                 output_tokens: None,
+                context_tokens: None,
             },
         )]),
         limits: SessionExecutionLimits {

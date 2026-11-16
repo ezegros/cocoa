@@ -29,7 +29,7 @@
 //! Context-aware OpenAI summaries retain the ordinary prefix with tool choice none;
 //! Anthropic reuses tools/system only. Oversized forks fall back to incremental
 //! input. These routes retain the same decoder-level tool-call rejection.
-//! ChatGPT subscription requests cannot set a token cap and do not support it.
+//! ChatGPT subscription requests omit unsupported output-token caps.
 //! Cancellation drops the HTTP future, not proof of remote generation stopping.
 //! Stalls return `ModelError::Stalled`; the engine classifies them as deadlines.
 
@@ -45,7 +45,7 @@ use cocoa_core::{
     execution::Cell,
     model::{
         ModelAction, ModelError, ModelProvider, ModelRequest, ModelResponse, RequestAccounting,
-        RequestPurpose, RequestSettings, SummaryRequest,
+        RequestPurpose, RequestSettings, RequestTokenBudget, SummaryRequest,
     },
 };
 use eventsource_stream::{EventStreamError, Eventsource};
@@ -135,7 +135,18 @@ impl Transport {
 #[async_trait]
 impl ModelProvider for Transport {
     fn request_bytes(&self, request: &ModelRequest) -> Result<Option<usize>, ModelError> {
-        self.body(request).map(|body| Some(body.len()))
+        // A fitted cap never has more digits than the unfitted ceiling, so this
+        // bounds the sent body without estimating tokens.
+        self.body(request, self.model_limits)
+            .map(|body| Some(body.len()))
+    }
+
+    fn request_token_budget(
+        &self,
+        request: &ModelRequest,
+    ) -> Result<Option<RequestTokenBudget>, ModelError> {
+        crate::tokens::budget(request, self.execution, self.model_limits)
+            .map(|(budget, _)| Some(budget))
     }
 
     async fn summarize(
@@ -213,8 +224,12 @@ impl ModelProvider for Transport {
             () = cancellation.cancelled() => Err(ModelError::Cancelled),
             () = stalled => Err(ModelError::Stalled),
             result = async {
+                let (budget, estimated) = crate::tokens::budget(&request, self.execution, self.model_limits)?;
+                let limits = self.model_limits.fit_output(budget.input_tokens)?;
+                let body = self.body(&request, limits)?;
+                let checkpoint = crate::tokens::checkpoint_through(&request);
                 let outgoing = EncodedRequest {
-                    body: self.body(&request)?,
+                    body,
                     execution: self.execution,
                     observations: Some(request.observations),
                     output_bytes: DECODER_BYTES,
@@ -222,7 +237,9 @@ impl ModelProvider for Transport {
                     purpose: RequestPurpose::Response,
                 };
                 check_work(deadline, &cancellation)?;
-                self.request(outgoing, &cancellation, progress, timeout).await
+                let mut response = self.request(outgoing, &cancellation, progress, timeout).await?;
+                crate::tokens::anchor(&mut response, checkpoint, estimated);
+                Ok(response)
             } => result,
         }
     }
@@ -663,11 +680,6 @@ impl Transport {
         if request.output_tokens == 0 || request.output_bytes == 0 {
             return Err(protocol("checkpoint output budget must be positive"));
         }
-        if self.kind == ProviderKind::ChatGpt {
-            return Err(protocol(
-                "checkpoint token budget unsupported by subscription transport",
-            ));
-        }
         let generate = async {
             let outgoing = EncodedRequest {
                 body: match context {
@@ -709,7 +721,7 @@ impl Transport {
         }
     }
 
-    fn body(&self, request: &ModelRequest) -> Result<Vec<u8>, ModelError> {
+    fn body(&self, request: &ModelRequest, limits: ModelLimits) -> Result<Vec<u8>, ModelError> {
         crate::validate_context(request)?;
         if self.kind.is_chat_completions() {
             return chat_completions::body(
@@ -719,7 +731,7 @@ impl Transport {
                 &self.session_id,
                 self.execution,
                 self.thinking_level,
-                self.model_limits,
+                limits,
             );
         }
         if self.kind == ProviderKind::Anthropic {
@@ -727,11 +739,11 @@ impl Transport {
                 request,
                 &self.model,
                 self.execution,
-                self.model_limits,
+                limits,
                 self.thinking_level,
             );
         }
-        self.responses().body(request, self.model_limits)
+        self.responses().body(request, limits)
     }
 
     fn context_summary_body(
@@ -746,8 +758,9 @@ impl Transport {
         }
         let mut candidate = match self.kind {
             ProviderKind::OpenAi => {
-                let mut body: Value = serde_json::from_slice(&self.body(context)?)
-                    .map_err(|_| protocol("invalid encoded request"))?;
+                let mut body: Value =
+                    serde_json::from_slice(&self.body(context, self.model_limits)?)
+                        .map_err(|_| protocol("invalid encoded request"))?;
                 let input = body["input"]
                     .as_array_mut()
                     .ok_or_else(|| protocol("missing encoded input"))?;
@@ -767,6 +780,7 @@ impl Transport {
                     self.execution,
                     ModelLimits {
                         output_tokens: Some(request.output_tokens),
+                        context_tokens: None,
                     },
                     self.thinking_level,
                 )?;
@@ -793,8 +807,29 @@ impl Transport {
                     json!("none")
                 };
             }
-            if encoded_within(body, input_bytes, "checkpoint_input").is_ok() {
-                return encode(body, input_bytes, "checkpoint_input");
+            let tokens = if self.kind == ProviderKind::OpenAi {
+                crate::tokens::budget(context, self.execution, self.model_limits)?
+                    .0
+                    .input_tokens
+                    .saturating_add(summary_tokens(&request.input))
+            } else {
+                crate::tokens::text(&body.to_string())
+            };
+            if let Ok(limits) = (ModelLimits {
+                output_tokens: Some(request.output_tokens.min(self.model_limits.output_limit())),
+                ..self.model_limits
+            })
+            .fit_output(tokens)
+            {
+                let parameter = if self.kind == ProviderKind::Anthropic {
+                    "max_tokens"
+                } else {
+                    "max_output_tokens"
+                };
+                body[parameter] = json!(limits.output_limit());
+                if encoded_within(body, input_bytes, "checkpoint_input").is_ok() {
+                    return encode(body, input_bytes, "checkpoint_input");
+                }
             }
         }
         let body = self.summary_body(request)?;
@@ -810,9 +845,16 @@ impl Transport {
     }
 
     fn summary_body(&self, request: &SummaryRequest) -> Result<Vec<u8>, ModelError> {
-        let limits = ModelLimits {
-            output_tokens: Some(request.output_tokens),
+        let output_tokens = if self.kind == ProviderKind::ChatGpt {
+            request.output_tokens.max(self.model_limits.output_limit())
+        } else {
+            request.output_tokens.min(self.model_limits.output_limit())
         };
+        let limits = ModelLimits {
+            output_tokens: Some(output_tokens),
+            ..self.model_limits
+        }
+        .fit_output(summary_tokens(&request.input))?;
         let mut input = vec![json!({"role":"user","content":request.input})];
         if self.kind == ProviderKind::Anthropic {
             return anthropic::encode_messages(
@@ -865,7 +907,7 @@ pub(crate) fn encode_request(
     limits: ModelLimits,
     output_parameter: &str,
 ) -> Result<Vec<u8>, ModelError> {
-    body[output_parameter] = json!(limits.output_tokens.unwrap_or(32_000));
+    body[output_parameter] = json!(limits.output_limit());
     encode(&body, REQUEST_BYTES, "request_body")
 }
 
@@ -874,6 +916,14 @@ pub(crate) fn check_text_bytes(bytes: usize, limit: usize) -> Result<(), ModelEr
         return Err(byte_limit("response", "output_text", bytes, limit));
     }
     Ok(())
+}
+
+fn summary_tokens(input: &str) -> u64 {
+    crate::tokens::text(input)
+        .saturating_add(crate::tokens::text(
+            cocoa_core::compaction::SUMMARY_INSTRUCTIONS,
+        ))
+        .saturating_add(128)
 }
 
 fn check_work(

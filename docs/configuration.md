@@ -21,7 +21,7 @@ Replace the model ID with one available to you. Hosted providers require [authen
 
 ## Model aliases
 
-An alias names a nonempty list of model choices. Each entry requires `provider` and `model`, and can set `effort`, `priority` and `fallback_only`. `priority` is an unsigned 8-bit integer constrained to `0` through `99`, with a default of `0`. `fallback_only` is a boolean with a default of `false`.
+An alias names a nonempty list of model choices. Each entry requires `provider` and `model`, and can set `effort`, `priority`, `fallback_only` and `context_tokens`. `priority` is an unsigned 8-bit integer constrained to `0` through `99`, with a default of `0`. `fallback_only` is a boolean with a default of `false`. `context_tokens` overrides discovered context-window metadata; see [compaction](#compaction).
 
 ```json
 {
@@ -116,33 +116,43 @@ Saved credentials are plaintext. Cocoa requires owner-only permissions, `0600` f
 
 ## Compaction
 
-Cocoa automatically summarizes older conversation history to make room for continued work. Original history remains available, and live JavaScript state is unchanged.
+Cocoa budgets each root and child request against its model's token window. It attempts compaction when the estimated input leaves no more than one headroom reserve: the larger of 10% of the window or the generation allowance. These reserves are not added together. The generation allowance is the model's output ceiling, capped at half the window. For a 500,000-token window with a 32,000-token generation allowance, compaction starts at 450,000 input tokens. The hard input limit is 468,000, leaving room for generation even if compaction fails. Summaries and proposed continuations must fit their own token allowances before Cocoa sends or publishes them. Original history remains available, and successful compaction leaves live JavaScript state unchanged. This uses Cocoa's validated checkpoints, not OpenAI's native compaction endpoint.
 
-Add or update the `compaction` object in your configuration to change its budgets:
+Server-reported usage calibrates the estimate between requests. Estimates include instructions, tool feedback, images and reasoning, and survive session resume. They are not exact tokenizer counts or guarantees that a provider will accept a request.
+
+Cocoa first reads limits from supported provider model catalogues, including ChatGPT's account-specific window, Anthropic's input/output limits and OpenRouter's advertised limits. For other standard hosted endpoints, or limits absent from those responses, it falls back to exact provider/model matches on models.dev. ChatGPT uses its account's reported context window, not a Platform API model's window or an experimental maximum. Missing context metadata uses a 128,000-token host fallback, which may exceed a smaller model's actual window. For local models, custom endpoints or missing metadata, set `context_tokens` to the deployed window in the alias choice:
+
+```json
+{ "provider": "ollama", "model": "qwen3-coder", "context_tokens": 65536 }
+```
+
+Token limits must be positive. The output ceiling is the discovered limit or a 32,000-token host default. Each request asks for at most the space remaining after its estimated input. For example, an 8,192-token window reserves 4,096 tokens for generation, starts compaction at 4,096 input tokens, and a request with 2,000 estimated input tokens asks for at most 6,192 output tokens. Summary requests also respect the model's output ceiling. ChatGPT does not accept an output-token cap, so its allowances guide local admission without sending that parameter. A host default is not a verified provider output maximum. Known limits stay pinned with the session. Older sessions resolve missing limits on resume and save them atomically with the next accepted input, without changing the saved model, account or execution settings.
+
+Encoded bytes have independent resource safeguards. Add or update the `compaction` object to change these, without changing token-window accounting:
 
 ```json
 {
   "compaction": {
-    "request_bytes": 1048576,
-    "trigger_bytes": 786432,
-    "target_bytes": 524288,
-    "summary_input_bytes": 2097152
+    "request_bytes": 67108864,
+    "trigger_bytes": 50331648,
+    "target_bytes": 33554432,
+    "summary_input_bytes": 67108864
   }
 }
 ```
 
-These are the defaults. All limits measure encoded bytes, not tokens:
+These defaults allow 64 MiB requests and a separate byte-pressure trigger at 48 MiB.
 
 | Key | Meaning |
 | --- | --- |
-| `request_bytes` | Maximum model request size |
-| `trigger_bytes` | Request size that triggers summarization |
+| `request_bytes` | Maximum encoded model request size, also capped by the transport at 64 MiB |
+| `trigger_bytes` | Independent byte size that triggers summarization |
 | `target_bytes` | Desired request size after summarization, not a guaranteed result |
 | `summary_input_bytes` | Maximum complete summary request size; an oversized request fails before contacting the provider |
 
-Require `0 < target_bytes < trigger_bytes < request_bytes` and a positive `summary_input_bytes`. Neither `request_bytes` nor `summary_input_bytes` may exceed 256 MiB. Increasing byte limits can still exceed the model's context window.
+Require `0 < target_bytes < trigger_bytes < request_bytes` and a positive `summary_input_bytes`. Neither `request_bytes` nor `summary_input_bytes` may exceed 256 MiB. A higher configured byte limit never overrides the transport cap or token budget.
 
-Summaries use the selected model and thinking settings. ChatGPT does not support summarization; start a new session with `/new` when the conversation reaches this limit. Failed summarization reports an error without deleting history.
+Summaries use the selected model and thinking settings, with tools disabled. ChatGPT summaries omit the unsupported output-token limit; the output-byte limit and 60-second deadline still apply. If compaction fails, Cocoa continues unchanged only when both token and byte budgets still fit. Otherwise it stops, retains the conversation and restarts the JavaScript runtime. Existing effects remain, so read current state again before mutating. The next prompt retries compaction if needed.
 
 ## File locations
 

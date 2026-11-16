@@ -2490,6 +2490,40 @@ async fn first_input_binds_exact_settings_atomically_and_empty_sessions_resume()
             completed,
         ]
     );
+    let StoredSessionSettings::Bound { mut effective } = session.settings().await? else {
+        return Err("missing bound settings".into());
+    };
+    let alias = effective.aliases.get_mut("main").ok_or("missing alias")?;
+    alias.context_tokens = Some(500_000);
+    alias.output_tokens = Some(64_000);
+    let resolved = session.root_store_with_settings(limits(), *effective.clone())?;
+    resolved
+        .append(&input("resolved model limits", 3), None)
+        .await?;
+    assert_eq!(
+        session.settings().await?,
+        StoredSessionSettings::Bound {
+            effective: effective.clone()
+        }
+    );
+    assert!(
+        rebound
+            .append(&input("cannot forget limits", 4), None)
+            .await
+            .is_err()
+    );
+    effective
+        .aliases
+        .get_mut("main")
+        .ok_or("missing alias")?
+        .context_tokens = Some(800_000);
+    let changed = session.root_store_with_settings(limits(), *effective)?;
+    assert!(
+        changed
+            .append(&input("cannot replace known limits", 4), None)
+            .await
+            .is_err()
+    );
     let empty = fixture
         .database
         .create_session(fixture._directory.path())
@@ -3373,6 +3407,7 @@ fn effective_settings() -> cocoa::persistence::EffectiveSessionSettings {
                 thinking_level: None,
                 reasoning_summary: false,
                 output_tokens: None,
+                context_tokens: None,
             },
         )]),
         limits: SessionExecutionLimits {

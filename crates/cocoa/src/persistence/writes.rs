@@ -284,6 +284,11 @@ async fn append_transaction(
             StoredSessionSettings::Bound {
                 effective: previous,
             } if previous.as_ref() == &effective => {}
+            StoredSessionSettings::Bound {
+                effective: previous,
+            } if previous.can_resolve_limits_to(&effective) => {
+                bind_settings(connection, store, &effective).await?;
+            }
             // A request that failed before any model output pinned nothing, so
             // the next accepted input may adopt the configuration now supplied.
             StoredSessionSettings::Bound { .. }

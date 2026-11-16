@@ -59,7 +59,7 @@ Run `cocoa login chatgpt` or `/login chatgpt`, confirm plan use and finish brows
 
 The account menu can add, reconnect, select and sign out accounts. Identity-only sign-in does not enable inference. Restart Cocoa after switching accounts; existing sessions may require their original account to resume.
 
-ChatGPT and `openai` are separate billing products. Cocoa does not add Platform API fallback automatically. If you include an `openai` choice with `fallback_only: true` in the same alias, an eligible [startup failure](configuration.md#startup-fallback) can use it and incur API charges. ChatGPT rejects API-key and custom-endpoint overrides. Its current summarization limitation is described under [compaction](configuration.md#compaction).
+ChatGPT and `openai` are separate billing products. Cocoa does not add Platform API fallback automatically. If you include an `openai` choice with `fallback_only: true` in the same alias, an eligible [startup failure](configuration.md#startup-fallback) can use it and incur API charges. ChatGPT rejects API-key and custom-endpoint overrides. [Compaction](configuration.md#compaction) uses the same ChatGPT account without switching to the Platform API.
 
 Paid or remotely hosted distribution of this ChatGPT integration requires OpenAI approval. Check the [integration terms](https://developers.openai.com/cookbook/articles/sign-in-with-chatgpt) before redistributing.
 

@@ -293,7 +293,7 @@ fn alias_updates_preserve_settings_and_clear_thinking_explicitly() -> Result<(),
     assert_eq!(
         value["compaction"],
         json!({
-            "request_bytes":268435456,"trigger_bytes":786432,"target_bytes":524288,
+            "request_bytes":268435456,"trigger_bytes":50331648,"target_bytes":33554432,
             "summary_input_bytes":268435456
         })
     );

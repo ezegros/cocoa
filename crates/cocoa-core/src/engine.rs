@@ -16,7 +16,7 @@ use crate::{
     execution::{CellExecutor, CellResponse, ExecutionError, RuntimeState},
     model::{
         AccountingSummary, ModelAction, ModelError, ModelProvider, ModelRequest, ModelResponse,
-        RequestAccounting, Usage, UserInput,
+        RequestAccounting, RequestTokenBudget, Usage, UserInput,
     },
     store::{
         ActiveSnapshot, FailureCause, InvocationId, InvocationOutcome, Record, RecordId,
@@ -993,7 +993,10 @@ impl Engine {
         let Some(previous_bytes) = self.adapters.model.request_bytes(&previous.0)? else {
             return Ok(previous);
         };
-        if previous_bytes < policy.trigger_bytes {
+        let tokens = self.adapters.model.request_token_budget(&previous.0)?;
+        let pressured_tokens =
+            tokens.filter(|budget| budget.input_tokens >= budget.compaction_trigger);
+        if pressured_tokens.is_none() && previous_bytes < policy.trigger_bytes {
             return Ok(previous);
         }
         let result = self
@@ -1001,9 +1004,9 @@ impl Engine {
                 &snapshot,
                 &previous.0,
                 operations,
-                cancellation,
                 policy,
                 previous_bytes,
+                pressured_tokens,
             )
             .await;
         match result {
@@ -1015,7 +1018,9 @@ impl Engine {
                 if cancellation.is_cancelled() {
                     return Err(RunError::Cancelled);
                 }
-                if previous_bytes <= policy.request_bytes {
+                if previous_bytes <= policy.request_bytes
+                    && tokens.is_none_or(|budget| budget.input_tokens <= budget.input_limit)
+                {
                     tracing::warn!(
                         "automatic checkpoint rejected; continuing unchanged request within budget"
                     );
@@ -1031,15 +1036,20 @@ impl Engine {
         snapshot: &ActiveSnapshot,
         previous: &ModelRequest,
         operations: &OperationContext,
-        cancellation: &CancellationToken,
         policy: CompactionPolicy,
         previous_bytes: usize,
+        pressured_tokens: Option<RequestTokenBudget>,
     ) -> Result<(ModelRequest, Option<InstructionState>), CompactionError> {
+        let cancellation = &operations.cancellation;
         let checkpoint_bytes =
             usize::try_from(policy.checkpoint.bytes).map_err(|_| CheckpointError::Limits)?;
         let through = compaction_boundary(
             snapshot,
-            policy.request_bytes.saturating_sub(checkpoint_bytes),
+            if pressured_tokens.is_some() {
+                0
+            } else {
+                policy.request_bytes.saturating_sub(checkpoint_bytes)
+            },
         )?;
         let key = (through, snapshot.checkpoint().map(|stored| stored.id));
         if self.compaction_attempt == Some(key) {
@@ -1097,7 +1107,15 @@ impl Engine {
         if bytes > policy.request_bytes {
             return Err(ContextError::Limit.into());
         }
-        if bytes >= previous_bytes {
+        let tokens = self.adapters.model.request_token_budget(&prepared.0)?;
+        if tokens.is_some_and(|budget| budget.input_tokens > budget.input_limit) {
+            return Err(ContextError::Limit.into());
+        }
+        let reduced = match (pressured_tokens, tokens) {
+            (Some(previous), Some(candidate)) => candidate.input_tokens < previous.input_tokens,
+            _ => bytes < previous_bytes,
+        };
+        if !reduced {
             return Err(CheckpointError::NoProgress.into());
         }
         if cancellation.is_cancelled() {

@@ -1,10 +1,7 @@
 //! Persistent terminal agent with matching local CLI and slash commands.
 
 mod agent_factory;
-mod auth;
-mod catalogue;
 mod clipboard;
-mod config;
 mod dialog;
 mod exec;
 mod mcp_command;
@@ -14,6 +11,7 @@ mod session_data;
 mod status;
 mod tui;
 
+use cocoa::{auth, catalogue, config};
 use session::run_description;
 use std::{io::IsTerminal, process::ExitCode};
 

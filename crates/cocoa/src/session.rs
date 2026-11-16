@@ -68,14 +68,10 @@ impl Session {
         .await
         .map_err(|_| CommandError::CodingSetup(cocoa_tools::ConfigurationError::Configuration))?
         .map_err(CommandError::CodingSetup)?;
-        // A session with no retained model output adopts this configuration on
-        // its next input, so its aliases resolve exactly as a new session's do.
-        if !resumed || attachment.model_switch_allowed().await? {
-            crate::catalogue::resolve_limits(&mut configuration.candidates).await;
-            for (name, choices) in &configuration.candidates {
-                if let Some(first) = choices.first() {
-                    configuration.aliases.insert(name.clone(), first.clone());
-                }
+        crate::catalogue::resolve_limits(&mut configuration.candidates).await;
+        for (name, choices) in &configuration.candidates {
+            if let Some(first) = choices.first() {
+                configuration.aliases.insert(name.clone(), first.clone());
             }
         }
         let store = attachment

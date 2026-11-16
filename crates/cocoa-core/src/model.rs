@@ -202,6 +202,18 @@ pub struct SummaryRequest {
     pub deadline: tokio::time::Instant,
 }
 
+/// Estimated model input, its admission limit and proactive compaction threshold.
+/// Estimates are not tokenizer-exact counts or guarantees of provider admission.
+#[derive(Clone, Copy, Debug)]
+pub struct RequestTokenBudget {
+    pub input_tokens: u64,
+    /// Maximum admitted input after leaving room for generation.
+    pub input_limit: u64,
+    /// Attempt compaction at or above this count, no greater than `input_limit`.
+    /// Failure may retain the unchanged request if it still fits `input_limit`.
+    pub compaction_trigger: u64,
+}
+
 /// A ready provider may be shared when its implementation supports it.
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
@@ -248,12 +260,25 @@ pub trait ModelProvider: Send + Sync {
         result
     }
 
-    /// Measure the complete encoded provider request before transport admission.
+    /// Bound the complete encoded provider request before transport admission.
+    /// Providers may conservatively count the unfitted generation ceiling.
     /// `None` means accounting is unavailable and automatic compaction is disabled.
     ///
     /// # Errors
     /// Report incompatible replay or encoded request limits without making a call.
     fn request_bytes(&self, _request: &ModelRequest) -> Result<Option<usize>, ModelError> {
+        Ok(None)
+    }
+
+    /// Budget model-visible input against the selected model's context window.
+    /// `None` retains byte-only admission for adapters without token accounting.
+    ///
+    /// # Errors
+    /// Reject invalid token limits or input that cannot be measured, without inference.
+    fn request_token_budget(
+        &self,
+        _request: &ModelRequest,
+    ) -> Result<Option<RequestTokenBudget>, ModelError> {
         Ok(None)
     }
 
@@ -311,6 +336,9 @@ pub trait ModelProvider: Send + Sync {
 /// Provider failures do not imply a completed assistant answer.
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
+    /// Local admission failure before inference, independent of provider replies.
+    #[error("model input exceeds context budget: {input_tokens} tokens, limit {input_limit}")]
+    ContextLimit { input_tokens: u64, input_limit: u64 },
     /// Explicit provider rejection before any response output was accepted.
     /// Unlike transport failures, this permits startup-only model fallback.
     #[error("model request rejected: {message}")]

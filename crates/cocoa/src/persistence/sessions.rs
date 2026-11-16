@@ -48,6 +48,9 @@ pub struct EffectiveAliasSettings {
     pub thinking_level: Option<String>,
     pub reasoning_summary: bool,
     pub output_tokens: Option<u32>,
+    /// Pinned model window. Missing legacy metadata may resolve on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u32>,
 }
 
 /// Effective execution/admission policy retained without process-local handles.
@@ -264,7 +267,8 @@ impl SessionAttachment {
     }
 
     /// Bind settings for the next accepted root input. Binding alone writes nothing.
-    /// Once model output is retained, appends reject changed settings.
+    /// Once model output is retained, appends may only fill missing token limits;
+    /// all other settings and known limits remain pinned.
     ///
     /// # Errors
     /// Reject invalid settings and store limits before constructing adapters.
@@ -402,6 +406,20 @@ impl SessionAttachment {
 }
 
 impl EffectiveSessionSettings {
+    /// Whether `resolved` only fills previously unknown model token limits.
+    /// Model identity, accounts, execution settings and known limits cannot change.
+    #[must_use]
+    pub fn can_resolve_limits_to(&self, resolved: &Self) -> bool {
+        let mut previous = self.clone();
+        for (name, alias) in &mut previous.aliases {
+            if let Some(candidate) = resolved.aliases.get(name) {
+                alias.output_tokens = alias.output_tokens.or(candidate.output_tokens);
+                alias.context_tokens = alias.context_tokens.or(candidate.context_tokens);
+            }
+        }
+        previous == *resolved
+    }
+
     pub(super) fn validate(&self) -> Result<(), PersistenceError> {
         let limits = &self.limits;
         if self.alias.is_empty()
@@ -426,6 +444,7 @@ impl EffectiveSessionSettings {
                     || alias.provider.is_empty()
                     || alias.model.is_empty()
                     || alias.output_tokens == Some(0)
+                    || alias.context_tokens == Some(0)
             })
         {
             return Err(PersistenceError::InvalidData("effective session settings"));

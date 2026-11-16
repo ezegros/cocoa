@@ -1,14 +1,13 @@
 //! Read-only checkpoint transport contracts against local HTTP fixtures.
 
-use std::{error::Error, sync::Arc, time::Duration};
+use std::{error::Error, time::Duration};
 
-use async_trait::async_trait;
 use cocoa_core::{
     compaction::{CheckpointProposal, Recap},
     model::{ModelError, ModelProvider, SummaryRequest},
 };
 use cocoa_llm::{
-    CredentialResolver, ModelLimits, Provider, ProviderKind, ProviderOptions,
+    ModelLimits, Provider, ProviderKind, ProviderOptions,
     openai::{ExecutionMode, OpenAiOptions, OpenAiProvider, ThinkingLevel},
 };
 use serde_json::{Value, json};
@@ -42,6 +41,7 @@ async fn summaries_are_exact_read_only_and_use_selected_model_credentials_and_th
         let mut provider = Provider::new(options)?;
         provider.set_model_limits(ModelLimits {
             output_tokens: Some(45678),
+            context_tokens: None,
         })?;
         let request = request(proposal.len());
         let input = request.input.clone();
@@ -130,6 +130,46 @@ async fn summaries_are_exact_read_only_and_use_selected_model_credentials_and_th
                 evidence: Vec::new(),
             })?
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn summary_generation_fits_small_windows_and_model_output_ceilings()
+-> Result<(), Box<dyn Error>> {
+    for kind in PROFILES {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(template(success(kind, "done")))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut provider = Provider::new(options(kind, &server.uri()))?;
+        for output_tokens in [None, Some(37)] {
+            provider.set_model_limits(ModelLimits {
+                output_tokens,
+                context_tokens: Some(8192),
+            })?;
+            let mut summary = request(4096);
+            summary.output_tokens = 32_000;
+            assert_eq!(
+                provider
+                    .summarize(summary, CancellationToken::new())
+                    .await?,
+                "done"
+            );
+        }
+        let sent = server.received_requests().await.ok_or("missing requests")?;
+        let field = if kind == ProviderKind::OpenAi {
+            "max_output_tokens"
+        } else {
+            "max_tokens"
+        };
+        let fitted = sent[0].body_json::<Value>()?[field]
+            .as_u64()
+            .ok_or("missing output cap")?;
+        assert!((4096..8192).contains(&fitted), "{kind}: {fitted}");
+        assert_eq!(sent[1].body_json::<Value>()?[field], 37, "{kind}");
     }
     Ok(())
 }
@@ -418,7 +458,7 @@ async fn invalid_budgets_expiry_and_precancellation_make_no_http_call() -> Resul
 {
     for kind in PROFILES {
         let server = MockServer::start().await;
-        let provider = Provider::new(options(kind, &server.uri()))?;
+        let mut provider = Provider::new(options(kind, &server.uri()))?;
         for (tokens, bytes) in [(0, 1), (1, 0)] {
             let mut request = request(bytes);
             request.output_tokens = tokens;
@@ -439,6 +479,20 @@ async fn invalid_budgets_expiry_and_precancellation_make_no_http_call() -> Resul
             provider.summarize(request(4096), cancelled).await,
             Err(ModelError::Cancelled)
         ));
+        provider.set_model_limits(ModelLimits {
+            context_tokens: Some(10_000),
+            output_tokens: None,
+        })?;
+        let mut oversized = request(4096);
+        oversized.input = "x".repeat(30_000);
+        let result = provider
+            .summarize(oversized, CancellationToken::new())
+            .await;
+        assert!(
+            matches!(result, Err(ModelError::ContextLimit { input_tokens, input_limit })
+            if input_tokens > input_limit && input_limit == 10_000 - 73),
+            "{kind}: {result:?}"
+        );
         assert!(
             server
                 .received_requests()
@@ -447,33 +501,6 @@ async fn invalid_budgets_expiry_and_precancellation_make_no_http_call() -> Resul
                 .is_empty()
         );
     }
-    Ok(())
-}
-
-#[tokio::test]
-async fn subscription_summary_is_unsupported_without_resolving_credentials()
--> Result<(), Box<dyn Error>> {
-    struct UnusedCredentials;
-    #[async_trait]
-    impl CredentialResolver for UnusedCredentials {
-        fn identity(&self) -> &str {
-            "summary-fixture"
-        }
-        async fn resolve(&self) -> Result<secrecy::SecretString, ModelError> {
-            panic!("unsupported summary must not resolve credentials")
-        }
-    }
-    let mut options = options(ProviderKind::OpenAi, "unused");
-    options.kind = ProviderKind::ChatGpt;
-    options.endpoint = ProviderKind::ChatGpt.endpoint_default().into();
-    options.api_key = None;
-    let provider = Provider::chatgpt(options, Arc::new(UnusedCredentials))?;
-    let result = provider
-        .summarize(request(4096), CancellationToken::new())
-        .await;
-    assert!(
-        matches!(result, Err(ModelError::Protocol { ref message }) if message.contains("unsupported"))
-    );
     Ok(())
 }
 

@@ -630,7 +630,7 @@ fn assert_process_stopped(home: &Path, pid: &str, ticks: &str) -> Result<(), Box
 }
 
 #[tokio::test]
-async fn default_compaction_policy_bounds_requests_and_keeps_original_records()
+async fn default_compaction_uses_token_pressure_and_keeps_original_records()
 -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -644,11 +644,12 @@ async fn default_compaction_policy_bounds_requests_and_keeps_original_records()
             let (mut stream, body, _) = request(&listener)?;
             assert_eq!(body["model"], "root-model");
             let event = if body["tool_choice"] == "none" || body.get("tools").is_none() {
+                assert_eq!(round, 2, "compaction must wait for token pressure");
                 assert!(!summarized);
                 summarized = true;
                 assert_eq!(body["max_output_tokens"], 8192);
                 let input: Value = serde_json::from_str(summary_evidence(&body)?)?;
-                assert_eq!(input["target_request_bytes"], 524288);
+                assert_eq!(input["target_request_bytes"], 32 * 1024 * 1024);
                 completion(&checkpoint_proposal())
             } else if summarized {
                 assert!(body.to_string().contains("checkpoint_projection"));
@@ -660,11 +661,12 @@ async fn default_compaction_policy_bounds_requests_and_keeps_original_records()
                 )?;
                 return Ok(());
             } else {
-                assert!(body.to_string().len() < 786432);
-                execution(
-                    round,
-                    &format!("print('step'); /*{}*/", "x".repeat(240 * 1024)),
-                )
+                assert!(
+                    round < 2,
+                    "token pressure must compact before a third model call"
+                );
+                let bytes = if round == 0 { 240 * 1024 } else { 48 * 1024 };
+                execution(round, &format!("print('step'); /*{}*/", "x".repeat(bytes)))
             };
             respond(&mut stream, "text/event-stream", &event)?;
         }
@@ -695,31 +697,153 @@ async fn default_compaction_policy_bounds_requests_and_keeps_original_records()
 }
 
 #[tokio::test]
-async fn request_compaction_budget_does_not_reduce_durable_input_admission()
--> Result<(), Box<dyn Error>> {
-    let home = tempfile::tempdir()?;
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let mut settings = configuration(&format!("http://{}/v1/responses", listener.local_addr()?));
-    settings["compaction"] =
-        json!({"request_bytes":10240,"trigger_bytes":8192,"target_bytes":4096});
-    write_configuration(home.path(), &settings)?;
-    let prompt = "x".repeat(20 * 1024);
-    let mut session =
-        Terminal::spawn(home.path(), &["--data-dir", "data", &prompt], 110, 30, None)?;
-    session.wait_text("automatic compaction failed; history retained")?;
-    session.command("exit")?;
-    session.finish(0)?;
-    no_requests(&listener)?;
-    let snapshot = saved_snapshot(home.path()).await?;
-    let history = snapshot
-        .histories
-        .values()
-        .next()
-        .ok_or("missing root history")?;
-    assert!(history.records.iter().any(|stored| {
+async fn compaction_budgets_do_not_reduce_durable_input_admission() -> Result<(), Box<dyn Error>> {
+    for context_tokens in [None, Some(4096)] {
+        let home = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut settings =
+            configuration(&format!("http://{}/v1/responses", listener.local_addr()?));
+        if let Some(tokens) = context_tokens {
+            settings["aliases"]["medium"][0]["context_tokens"] = json!(tokens);
+        } else {
+            settings["compaction"] =
+                json!({"request_bytes":10240,"trigger_bytes":8192,"target_bytes":4096});
+        }
+        write_configuration(home.path(), &settings)?;
+        let prompt = "x".repeat(20 * 1024);
+        let mut session =
+            Terminal::spawn(home.path(), &["--data-dir", "data", &prompt], 110, 30, None)?;
+        session.wait_text("automatic compaction failed; history retained")?;
+        session.command("exit")?;
+        session.finish(0)?;
+        no_requests(&listener)?;
+        let snapshot = saved_snapshot(home.path()).await?;
+        let history = snapshot
+            .histories
+            .values()
+            .next()
+            .ok_or("missing root history")?;
+        assert!(history.records.iter().any(|stored| {
         matches!(&stored.record.kind, cocoa_core::store::RecordKind::InputAccepted { input } if input.text() == prompt)
     }));
-    assert!(history.checkpoints.is_empty());
+        assert!(history.checkpoints.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_compaction_keeps_the_session_and_can_retry_without_repeating_effects()
+-> Result<(), Box<dyn Error>> {
+    for recovery_available in [true, false] {
+        let home = tempfile::tempdir()?;
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let mut settings =
+            configuration(&format!("http://{}/v1/responses", listener.local_addr()?));
+        settings["compaction"] = json!({
+            "request_bytes":131072,"trigger_bytes":65536,"target_bytes":32768,
+            "summary_input_bytes":2097152
+        });
+        write_configuration(home.path(), &settings)?;
+        let configuration_path = home.path().join(".config/cocoa/config.json");
+        let server = thread::spawn(move || -> Result<(), Box<dyn Error + Send + Sync>> {
+            for round in 0..4 {
+                let (mut stream, body, _) = request(&listener)?;
+                let event = match round {
+                    0 => execution(
+                        round,
+                        &format!(
+                            "var destination = await cocoa.read({{path:'effect.txt'}}); await cocoa.write({{file:destination.file,content:'one effect'}}); /*{}*/",
+                            "x".repeat(140 * 1024)
+                        ),
+                    ),
+                    1 | 2 => {
+                        assert_eq!(body["tool_choice"], "none");
+                        let evidence = summary_evidence(&body)?;
+                        assert!(evidence.contains("Keep the original goal"));
+                        if round == 2 {
+                            assert!(evidence.contains("one effect"));
+                        }
+                        if round == 1 && !recovery_available {
+                            fs::write(&configuration_path, b"{")?;
+                        }
+                        let proposal = if round == 1 {
+                            "{}".to_owned()
+                        } else {
+                            checkpoint_proposal()
+                        };
+                        completion(&proposal)
+                    }
+                    3 => {
+                        assert!(body.to_string().contains("checkpoint_projection"));
+                        assert!(
+                            body.to_string()
+                                .contains("Retry with the original conversation")
+                        );
+                        completion("conversation recovered")
+                    }
+                    _ => unreachable!("bounded fixture"),
+                };
+                respond(&mut stream, "text/event-stream", &event)?;
+            }
+            no_requests(&listener)?;
+            Ok(())
+        });
+        let mut session = Terminal::spawn(
+            home.path(),
+            &["--data-dir", "data", "Keep the original goal"],
+            110,
+            30,
+            None,
+        )?;
+        if recovery_available {
+            session.wait_text("automatic compaction failed; history retained")?;
+            session.wait_text("Conversation retained")?;
+            assert!(!session.contains("Session reset"));
+        } else {
+            session.finish(1)?;
+            assert!(!String::from_utf8_lossy(&session.transcript).contains("Session reset"));
+            write_configuration(home.path(), &settings)?;
+            session = Terminal::spawn(
+                home.path(),
+                &["--data-dir", "data", "resume", "--last"],
+                110,
+                30,
+                None,
+            )?;
+            session.wait_text("Session resumed")?;
+        }
+        assert_eq!(
+            fs::read_to_string(home.path().join("effect.txt"))?,
+            "one effect"
+        );
+        session.command("Retry with the original conversation")?;
+        finish_answer(&mut session, "conversation recovered")?;
+        server
+            .join()
+            .map_err(|_| "compaction retry fixture panicked")?
+            .map_err(|error| -> Box<dyn Error> { error })?;
+        let snapshot = saved_snapshot(home.path()).await?;
+        let history = snapshot
+            .histories
+            .values()
+            .next()
+            .ok_or("missing root history")?;
+        assert_eq!(history.checkpoints.len(), 1);
+        assert_eq!(
+        history.records.iter().filter(|stored| matches!(
+            &stored.record.kind,
+            cocoa_core::store::RecordKind::OperationStarted { name, .. } if name == "cocoa.write"
+        )).count(),
+        1
+    );
+        let database =
+            cocoa::persistence::SessionDatabase::open(&home.path().join("data/sessions.sqlite3"))
+                .await?;
+        assert_eq!(
+            database.list_sessions(None, 10, None).await?.sessions.len(),
+            1
+        );
+    }
     Ok(())
 }
 
@@ -892,6 +1016,7 @@ async fn resumed_alias_adopts_current_request_policy_without_changing_saved_exec
         "request_bytes":262144,"trigger_bytes":131072,"target_bytes":65536,
         "summary_input_bytes":1048576
     });
+    settings["aliases"]["medium"][0]["context_tokens"] = json!(500_000);
     write_configuration(home.path(), &settings)?;
     let mut resumed = Terminal::spawn(
         home.path(),
@@ -908,7 +1033,16 @@ async fn resumed_alias_adopts_current_request_policy_without_changing_saved_exec
         .map_err(|_| "resume compaction fixture panicked")?
         .map_err(|error| -> Box<dyn Error> { error })?;
     let restored = saved_snapshot(home.path()).await?;
-    assert_eq!(restored.settings, saved.settings);
+    let mut expected = saved.settings.clone();
+    let cocoa::persistence::StoredSessionSettings::Bound { effective } = &mut expected else {
+        return Err("missing saved settings".into());
+    };
+    effective
+        .aliases
+        .get_mut("medium")
+        .ok_or("missing alias")?
+        .context_tokens = Some(500_000);
+    assert_eq!(restored.settings, expected);
     let history = restored
         .histories
         .values()
@@ -1174,12 +1308,12 @@ fn invalid_configuration_and_alias_choices_fail_without_network_or_writes()
         ),
         (
             "compaction",
-            json!({"target_bytes":786432}),
+            json!({"target_bytes":50331648}),
             "invalid bounds",
         ),
         (
             "compaction",
-            json!({"trigger_bytes":1048576}),
+            json!({"trigger_bytes":67108864}),
             "invalid bounds",
         ),
         (
@@ -1586,6 +1720,7 @@ fn eight_mib_paste_is_retained_and_an_extra_byte_is_rejected_atomically()
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let mut settings = configuration(&format!("http://{}/v1/responses", listener.local_addr()?));
     settings["input_bytes"] = json!(8_388_608);
+    settings["aliases"]["medium"][0]["context_tokens"] = json!(16_000_000);
     settings["compaction"] = json!({
         "request_bytes":16777216,"trigger_bytes":12582912,"target_bytes":8388608
     });

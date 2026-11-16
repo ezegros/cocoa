@@ -23,7 +23,7 @@ use cocoa_core::{
     store::{InMemoryStore, InvocationId, Record, RecordId, RecordKind, StoreLimits},
 };
 use cocoa_llm::{
-    Provider, ProviderKind, ProviderOptions,
+    ModelLimits, Provider, ProviderKind, ProviderOptions,
     openai::{ExecutionMode, ThinkingLevel},
 };
 use serde_json::{Value, json};
@@ -212,6 +212,169 @@ fn call(id: &str, code: &str) -> Value {
 }
 fn template(events: &[Value]) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_raw(encode(events), "text/event-stream")
+}
+
+#[tokio::test]
+async fn context_budgets_reserve_generation_or_ten_percent_without_stacking()
+-> Result<(), Box<dyn Error>> {
+    let request = request().await?;
+    for (context_tokens, output_tokens, input_limit, compaction_trigger) in [
+        (None, None, 96_000, 96_000),
+        (Some(500_000), None, 468_000, 450_000),
+        (Some(500_003), Some(1700), 498_303, 450_002),
+        (Some(200_000), Some(96_000), 104_000, 104_000),
+        (Some(64_000), Some(4096), 59_904, 57_600),
+        (Some(8192), None, 4096, 4096),
+        (Some(16_384), None, 8192, 8192),
+        (Some(32_000), None, 16_000, 16_000),
+        (Some(32_001), None, 16_000, 16_000),
+        (Some(32_768), None, 16_384, 16_384),
+        (Some(40_960), None, 20_480, 20_480),
+        (Some(64_000), None, 32_000, 32_000),
+        (Some(65_536), None, 33_536, 33_536),
+        (Some(131_072), Some(131_071), 65_536, 65_536),
+        (Some(131_072), Some(131_072), 65_536, 65_536),
+    ] {
+        let mut provider = Provider::new(options("http://127.0.0.1:1"))?;
+        provider.set_model_limits(ModelLimits {
+            context_tokens,
+            output_tokens,
+        })?;
+        let budget = provider
+            .request_token_budget(&request)?
+            .ok_or("missing token budget")?;
+        assert_eq!(budget.input_limit, input_limit);
+        assert_eq!(budget.compaction_trigger, compaction_trigger);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn small_windows_fit_wire_output_to_remaining_context() -> Result<(), Box<dyn Error>> {
+    for kind in [
+        ProviderKind::OpenAi,
+        ProviderKind::Anthropic,
+        ProviderKind::Nvidia,
+        ProviderKind::Ollama,
+    ] {
+        for (context_tokens, output_tokens, input_limit) in [
+            (8192, None, 4096),
+            (16_384, None, 8192),
+            (32_000, None, 16_000),
+            (32_768, None, 16_384),
+            (131_072, Some(131_072), 65_536),
+        ] {
+            let server = MockServer::start().await;
+            let stream = match kind {
+                ProviderKind::Anthropic => encode(&events(vec![text_block("done")], "end_turn")),
+                ProviderKind::OpenAi => format!(
+                    "data: {}\n\n",
+                    json!({"type":"response.completed","response":{"id":"answer","status":"completed","output":[{"id":"message","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done"}]}],"usage":{"input_tokens":29,"output_tokens":11}}})
+                ),
+                _ => format!(
+                    "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    json!({"id":"answer","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":null}]}),
+                    json!({"id":"answer","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}),
+                    json!({"id":"answer","choices":[],"usage":{"prompt_tokens":29,"completion_tokens":11}})
+                ),
+            };
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(stream, "text/event-stream"))
+                .expect(3)
+                .mount(&server)
+                .await;
+            let mut options = options(&server.uri());
+            options.kind = kind;
+            options.endpoint = format!("{}/v1/responses", server.uri());
+            options.api_key = (kind != ProviderKind::Ollama).then(|| "fixture-api-key".into());
+            let mut provider = Provider::new(options)?;
+            provider.set_model_limits(ModelLimits {
+                context_tokens: Some(context_tokens),
+                output_tokens,
+            })?;
+            let mut request = request().await?;
+            let response = provider
+                .respond(request.clone(), CancellationToken::new())
+                .await?;
+            assert_eq!(
+                response
+                    .usage
+                    .as_ref()
+                    .map(|usage| (usage.input_tokens, usage.output_tokens)),
+                Some((29, 11))
+            );
+            request.context.records.push(Record {
+                invocation: request.context.records[0].invocation,
+                kind: RecordKind::ModelCompleted { response },
+            });
+            let budget = provider
+                .request_token_budget(&request)?
+                .ok_or("missing budget")?;
+            assert!(budget.input_tokens >= 29 + 11);
+            let first_cap = (u64::from(context_tokens) - budget.input_tokens)
+                .min(u64::from(output_tokens.unwrap_or(32_000)));
+            provider
+                .respond(request.clone(), CancellationToken::new())
+                .await?;
+            let field = if kind == ProviderKind::OpenAi {
+                "max_output_tokens"
+            } else {
+                "max_tokens"
+            };
+            let sent = server.received_requests().await.ok_or("missing requests")?;
+            assert_eq!(sent[1].body_json::<Value>()?[field], first_cap, "{kind}");
+            // Shift reported usage to reach each admission boundary without
+            // depending on the estimator's text ratio or message framing.
+            let retained_tokens = budget.input_tokens - 29;
+            for input_tokens in [input_limit, input_limit + 1] {
+                let RecordKind::ModelCompleted { response } = &mut request
+                    .context
+                    .records
+                    .last_mut()
+                    .ok_or("missing retained response")?
+                    .kind
+                else {
+                    return Err("missing retained response".into());
+                };
+                response.usage.as_mut().ok_or("missing usage")?.input_tokens =
+                    u64::from(input_tokens)
+                        .checked_sub(retained_tokens)
+                        .ok_or("fixture exceeds input limit")?;
+                let result = provider
+                    .respond(request.clone(), CancellationToken::new())
+                    .await;
+                if input_tokens == input_limit {
+                    assert_eq!(
+                        result?.action,
+                        ModelAction::Final {
+                            answer: "done".into()
+                        }
+                    );
+                    let sent = server.received_requests().await.ok_or("missing requests")?;
+                    assert_eq!(
+                        sent[2].body_json::<Value>()?[field],
+                        context_tokens - input_limit,
+                        "{kind}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(ModelError::ContextLimit { input_tokens: observed, input_limit: limit })
+                        if observed == u64::from(input_tokens) && limit == u64::from(input_limit)),
+                        "{kind}"
+                    );
+                }
+            }
+            assert_eq!(
+                server
+                    .received_requests()
+                    .await
+                    .ok_or("missing requests")?
+                    .len(),
+                3
+            );
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]

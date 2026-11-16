@@ -361,7 +361,7 @@ fn cleanup_command(child: &mut std::process::Child, group: rustix::process::Pid)
 }
 
 fn run_chatgpt(command: AuthCommand) -> Result<(), AuthError> {
-    let client = cocoa::chatgpt::client(None)?;
+    let client = crate::chatgpt::client(None)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

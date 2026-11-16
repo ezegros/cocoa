@@ -155,6 +155,7 @@ async fn durable_children_restore_exact_results_and_ownership_without_restarting
                 thinking_level: None,
                 reasoning_summary: false,
                 output_tokens: None,
+                context_tokens: None,
             },
         )]),
         limits: SessionExecutionLimits {

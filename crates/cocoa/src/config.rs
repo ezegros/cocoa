@@ -38,8 +38,8 @@ pub struct Configuration {
     pub agents_active: usize,
     pub agents_retained: usize,
     pub message_steering: bool,
-    pub web_search: cocoa::mcp::SearchProvider,
-    pub mcp_servers: BTreeMap<String, cocoa::mcp::Server>,
+    pub web_search: crate::mcp::SearchProvider,
+    pub mcp_servers: BTreeMap<String, crate::mcp::Server>,
 }
 
 /// Resolved provider settings and a captured credential source for one alias.
@@ -59,7 +59,7 @@ pub struct ResolvedAlias {
 }
 
 /// Explicit environment selection, saved auth with provider-environment fallback, or OAuth.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CredentialSource {
     None,
     Environment { reference: String },
@@ -77,8 +77,8 @@ impl Configuration {
     /// Reject an unavailable root alias/account or limits outside stored integer bounds.
     pub fn effective_settings(
         &self,
-    ) -> Result<cocoa::persistence::EffectiveSessionSettings, ConfigError> {
-        use cocoa::persistence::{EffectiveSessionSettings, SessionExecutionLimits};
+    ) -> Result<crate::persistence::EffectiveSessionSettings, ConfigError> {
+        use crate::persistence::{EffectiveSessionSettings, SessionExecutionLimits};
         let profile = ResolvedAlias::effective_settings;
         let root = profile(self.aliases.get(&self.alias).ok_or(ConfigError::Alias)?)?;
         if self.provider == ProviderKind::ChatGpt && root.account.is_none() {
@@ -169,8 +169,8 @@ impl Configuration {
 ///
 /// # Errors
 /// Reject missing credentials, unavailable pinned accounts or changed execution settings.
-pub(crate) fn resume_configuration(
-    saved: &cocoa::persistence::EffectiveSessionSettings,
+pub fn resume_configuration(
+    saved: &crate::persistence::EffectiveSessionSettings,
 ) -> Result<Configuration, ConfigError> {
     let mut configuration = if saved.alias.contains('/') && !aliases()?.contains_key(&saved.alias) {
         let thinking = saved
@@ -222,6 +222,8 @@ pub(crate) fn resume_configuration(
     for (name, alias) in &mut configuration.aliases {
         if let Some(saved) = saved.aliases.get(name) {
             alias.model_limits.output_tokens = saved.output_tokens;
+            alias.model_limits.context_tokens =
+                saved.context_tokens.or(alias.model_limits.context_tokens);
         }
     }
     for (name, choices) in &mut configuration.candidates {
@@ -231,7 +233,7 @@ pub(crate) fn resume_configuration(
             first.model_limits = selected.model_limits;
         }
     }
-    if configuration.effective_settings()? != *saved {
+    if !saved.can_resolve_limits_to(&configuration.effective_settings()?) {
         return Err(ConfigError::SessionCompatibility);
     }
     Ok(configuration)
@@ -244,8 +246,8 @@ impl ResolvedAlias {
     /// Reject an effort that cannot be serialized.
     pub fn effective_settings(
         &self,
-    ) -> Result<cocoa::persistence::EffectiveAliasSettings, ConfigError> {
-        Ok(cocoa::persistence::EffectiveAliasSettings {
+    ) -> Result<crate::persistence::EffectiveAliasSettings, ConfigError> {
+        Ok(crate::persistence::EffectiveAliasSettings {
             provider: self.kind.to_string(),
             endpoint: Some(self.endpoint.clone()),
             model: self.model.clone(),
@@ -265,6 +267,7 @@ impl ResolvedAlias {
                 .transpose()?,
             reasoning_summary: self.reasoning_summary,
             output_tokens: self.model_limits.output_tokens,
+            context_tokens: self.model_limits.context_tokens,
         })
     }
 
@@ -310,8 +313,8 @@ impl ResolvedAlias {
                 let registration = registration
                     .clone()
                     .ok_or(cocoa_oauth::OAuthError::Reauthorize)?;
-                Ok(Some(std::sync::Arc::new(cocoa::chatgpt::Credentials::new(
-                    cocoa::chatgpt::client(None)?,
+                Ok(Some(std::sync::Arc::new(crate::chatgpt::Credentials::new(
+                    crate::chatgpt::client(None)?,
                     registration,
                 ))))
             }
@@ -350,7 +353,7 @@ pub struct Arguments {
     pub data_dir: Option<PathBuf>,
     /// Override the configured TUI theme without changing saved settings.
     #[arg(long, global = true, value_enum)]
-    pub theme: Option<cocoa::theme::Theme>,
+    pub theme: Option<crate::theme::Theme>,
     /// Show a static chocolate bar instead of the animated TUI loader.
     #[arg(long, global = true)]
     pub reduced_motion: bool,
@@ -359,7 +362,7 @@ pub struct Arguments {
 #[derive(Subcommand)]
 pub enum Command {
     /// Update Cocoa, check availability or pin an exact release.
-    Update(cocoa::update::Arguments),
+    Update(crate::update::Arguments),
     /// Run one instruction without a terminal and print a JSON outcome.
     Exec {
         /// Save a sanitized whole-session JSON export after shutdown; path must not exist.
@@ -384,7 +387,7 @@ pub enum Command {
     /// Select built-in Exa, an MCP search server, or disabled built-in search.
     Search {
         #[command(subcommand)]
-        provider: cocoa::mcp::SearchProvider,
+        provider: crate::mcp::SearchProvider,
     },
     /// Save an API key from hidden terminal input or piped stdin.
     Login { provider: ProviderKind },
@@ -429,7 +432,7 @@ pub enum SessionCommand {
         limit: u32,
         /// Continue after a cursor returned by an earlier list.
         #[arg(long, value_name = "CURSOR")]
-        before: Option<cocoa::persistence::SessionCursor>,
+        before: Option<crate::persistence::SessionCursor>,
         /// Print metadata and the continuation cursor as compact JSON.
         #[arg(long)]
         json: bool,
@@ -462,7 +465,8 @@ pub struct ResumeCommand {
     pub cwd: Option<PathBuf>,
 }
 
-pub(crate) enum SessionAction {
+/// A parsed local session command, without configuration or credential resolution.
+pub enum SessionAction {
     New,
     Resume(ResumeCommand),
     Browse(String),
@@ -471,7 +475,10 @@ pub(crate) enum SessionAction {
 }
 
 /// Parse local session commands without resolving configuration or credentials.
-pub(crate) fn session_action(command: &str) -> Result<Option<SessionAction>, ConfigError> {
+///
+/// # Errors
+/// Reject malformed arguments to recognized session commands.
+pub fn session_action(command: &str) -> Result<Option<SessionAction>, ConfigError> {
     let (name, arguments) = command
         .trim()
         .split_once(char::is_whitespace)
@@ -561,7 +568,7 @@ pub struct Selection {
 /// Launch-time presentation, independent of execution and durable session compatibility.
 #[derive(Default)]
 pub struct Presentation {
-    pub theme: cocoa::theme::Theme,
+    pub theme: crate::theme::Theme,
     pub reduced_motion: bool,
 }
 
@@ -573,7 +580,7 @@ struct Settings {
         deserialize_with = "unique_table",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
-    mcp_servers: BTreeMap<String, cocoa::mcp::Server>,
+    mcp_servers: BTreeMap<String, crate::mcp::Server>,
     #[serde(default, deserialize_with = "unique_table")]
     providers: BTreeMap<String, Provider>,
     #[serde(
@@ -586,7 +593,7 @@ struct Settings {
     default_alias: Option<String>,
     /// TUI palette. Omission selects Dark chocolate, including during onboarding.
     #[serde(skip_serializing_if = "Option::is_none")]
-    theme: Option<cocoa::theme::Theme>,
+    theme: Option<crate::theme::Theme>,
     /// Replace the busy animation with a static bar. Omission enables motion.
     #[serde(skip_serializing_if = "Option::is_none")]
     reduced_motion: Option<bool>,
@@ -598,7 +605,7 @@ struct Settings {
     message_steering: Option<bool>,
     /// Search provider. Defaults to keyless Exa; MCP grants remain independent.
     #[serde(skip_serializing_if = "Option::is_none")]
-    web_search: Option<cocoa::mcp::SearchProvider>,
+    web_search: Option<crate::mcp::SearchProvider>,
     /// Prompt byte budget, 1..=8388608. Default 8388608.
     #[serde(skip_serializing_if = "Option::is_none")]
     input_bytes: Option<u64>,
@@ -626,36 +633,35 @@ struct Settings {
     agents_retained: Option<u64>,
 }
 
-/// Host byte budgets, not estimates of a model's token context window.
+/// Independent host byte safeguards in addition to model token-window budgeting.
 /// Require 0 < target < trigger < request and positive summary input, each at
 /// most the engine's context limit, currently 256 MiB. These settings never
 /// reduce accepted input/record limits or discard canonical evidence.
-/// Summary generation has a 60-second deadline, an 8192-token output cap and
-/// 4096 sources. Checkpoints allow 256 KiB, 256 required entries and 256 items
-/// per other collection. These independent bounds do not imply token-window fit.
-/// Summaries use the selected provider/model and preserve its thinking settings.
-/// ChatGPT subscriptions cannot enforce the summary output-token cap and reject
-/// summarization; there is no fallback provider/model or context-fit guarantee.
+/// Summary generation has a 60-second deadline and 4096 sources. Providers that
+/// support output-token limits also receive an 8192-token cap. Checkpoints allow
+/// 256 KiB, 256 required entries and 256 items per other collection. These
+/// independent bounds do not imply token-window fit. Summaries use the selected
+/// provider/model and preserve its thinking settings; there is no fallback.
 #[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 struct CompactionSettings {
-    /// Complete encoded continuation request, including provider framing. Default 1 MiB.
+    /// Complete encoded continuation request, including provider framing. Default 64 MiB.
     request_bytes: u64,
-    /// Attempt compaction at this encoded continuation size. Default 768 KiB.
+    /// Independent byte-pressure trigger. Default 48 MiB.
     trigger_bytes: u64,
-    /// Soft continuation target, not a guaranteed fit. Default 512 KiB.
+    /// Soft byte target, not a guaranteed fit. Default 32 MiB.
     target_bytes: u64,
-    /// Portable summary evidence/instructions and hosted summary wire bound. Default 2 MiB.
+    /// Portable summary evidence/instructions and hosted summary wire bound. Default 64 MiB.
     summary_input_bytes: u64,
 }
 
 impl Default for CompactionSettings {
     fn default() -> Self {
         Self {
-            request_bytes: 1024 * 1024,
-            trigger_bytes: 768 * 1024,
-            target_bytes: 512 * 1024,
-            summary_input_bytes: 2 * 1024 * 1024,
+            request_bytes: 64 * 1024 * 1024,
+            trigger_bytes: 48 * 1024 * 1024,
+            target_bytes: 32 * 1024 * 1024,
+            summary_input_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -714,6 +720,9 @@ pub struct Alias {
     pub fallback_only: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     reasoning_summary: bool,
+    /// Explicit context window for custom endpoints or missing model metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_tokens: Option<u32>,
 }
 
 impl Alias {
@@ -731,6 +740,7 @@ impl Alias {
             priority,
             fallback_only: false,
             reasoning_summary: false,
+            context_tokens: None,
         }
     }
 }
@@ -756,7 +766,7 @@ pub struct AliasSuggestion {
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error(transparent)]
-    Mcp(#[from] cocoa::mcp::McpError),
+    Mcp(#[from] crate::mcp::McpError),
     #[error(transparent)]
     OAuth(#[from] cocoa_oauth::OAuthError),
     #[error(transparent)]
@@ -897,7 +907,7 @@ pub fn load_selection(
     )?;
     for alias in configuration.candidates.values_mut().flatten() {
         if let CredentialSource::Subscription { registration } = &mut alias.credential_source {
-            *registration = cocoa::chatgpt::client(None)?.active_registration().ok();
+            *registration = crate::chatgpt::client(None)?.active_registration().ok();
         }
     }
     let candidates = configuration
@@ -972,9 +982,9 @@ pub fn aliases() -> Result<BTreeMap<String, Vec<Alias>>, ConfigError> {
 ///
 /// # Errors
 /// Reject malformed configuration, unsafe endpoints or duplicate grant IDs.
-pub fn mcp_servers() -> Result<BTreeMap<String, cocoa::mcp::Server>, ConfigError> {
+pub fn mcp_servers() -> Result<BTreeMap<String, crate::mcp::Server>, ConfigError> {
     let servers = read_settings()?.mcp_servers;
-    cocoa::mcp::validate_servers(&servers)?;
+    crate::mcp::validate_servers(&servers)?;
     Ok(servers)
 }
 
@@ -982,9 +992,9 @@ pub fn mcp_servers() -> Result<BTreeMap<String, cocoa::mcp::Server>, ConfigError
 ///
 /// # Errors
 /// Reject unavailable home directory, configuration or HTTP initialization.
-pub fn mcp_manager() -> Result<cocoa::mcp::McpManager, ConfigError> {
+pub fn mcp_manager() -> Result<crate::mcp::McpManager, ConfigError> {
     let home = std::env::home_dir().ok_or(ConfigError::Save)?;
-    let manager = cocoa::mcp::McpManager::new(home.join(".config/cocoa/oauth/mcp"))?;
+    let manager = crate::mcp::McpManager::new(home.join(".config/cocoa/oauth/mcp"))?;
     let settings = read_settings()?;
     manager.configure(settings.mcp_servers)?;
     manager.set_search_provider(settings.web_search.unwrap_or_default())?;
@@ -996,16 +1006,16 @@ pub fn mcp_manager() -> Result<cocoa::mcp::McpManager, ConfigError> {
 ///
 /// # Errors
 /// Reject selection of a missing/disabled server or failed configuration persistence.
-pub fn save_search_provider(provider: cocoa::mcp::SearchProvider) -> Result<(), ConfigError> {
+pub fn save_search_provider(provider: crate::mcp::SearchProvider) -> Result<(), ConfigError> {
     save_settings(|file| {
-        cocoa::mcp::validate_servers(&file.mcp_servers)?;
-        if let cocoa::mcp::SearchProvider::Mcp { server } = &provider
+        crate::mcp::validate_servers(&file.mcp_servers)?;
+        if let crate::mcp::SearchProvider::Mcp { server } = &provider
             && !file
                 .mcp_servers
                 .get(server)
-                .is_some_and(cocoa::mcp::Server::enabled)
+                .is_some_and(crate::mcp::Server::enabled)
         {
-            return Err(cocoa::mcp::McpError::Unavailable.into());
+            return Err(crate::mcp::McpError::Unavailable.into());
         }
         file.web_search = Some(provider);
         Ok(file.aliases.keys().next().cloned().unwrap_or_default())
@@ -1014,8 +1024,8 @@ pub fn save_search_provider(provider: cocoa::mcp::SearchProvider) -> Result<(), 
 
 /// An MCP grant edit. Add requires a new name; replace and remove require an existing name.
 pub enum McpEdit {
-    Add(cocoa::mcp::Server),
-    Replace(cocoa::mcp::Server),
+    Add(crate::mcp::Server),
+    Replace(crate::mcp::Server),
     Remove,
 }
 
@@ -1029,7 +1039,7 @@ pub fn save_mcp(name: String, edit: McpEdit) -> Result<(), ConfigError> {
         if add && file.mcp_servers.contains_key(&name)
             || !add && !file.mcp_servers.contains_key(&name)
         {
-            return Err(cocoa::mcp::McpError::Configuration.into());
+            return Err(crate::mcp::McpError::Configuration.into());
         }
         match edit {
             McpEdit::Add(server) | McpEdit::Replace(server) => {
@@ -1039,7 +1049,7 @@ pub fn save_mcp(name: String, edit: McpEdit) -> Result<(), ConfigError> {
                 file.mcp_servers.remove(&name);
             }
         }
-        cocoa::mcp::validate_servers(&file.mcp_servers)?;
+        crate::mcp::validate_servers(&file.mcp_servers)?;
         Ok(file.aliases.keys().next().cloned().unwrap_or_default())
     })
 }
@@ -1163,6 +1173,9 @@ pub fn save_alias(
         let priority = existing.map_or(0, |alias| alias.priority);
         let reasoning_summary = existing.is_some_and(|alias| alias.reasoning_summary)
             && provider == ProviderKind::OpenAi;
+        let context_tokens = existing
+            .filter(|alias| alias.provider == provider.to_string() && alias.model == model)
+            .and_then(|alias| alias.context_tokens);
         file.providers
             .entry(provider.to_string())
             .or_insert(Provider {
@@ -1176,6 +1189,7 @@ pub fn save_alias(
             priority,
             fallback_only: false,
             reasoning_summary,
+            context_tokens,
         };
         if let Some(index) = index {
             entries[index] = entry;
@@ -1257,7 +1271,7 @@ pub fn setup_provider(
         reasoning_summary: false,
         credential_source: if kind == ProviderKind::ChatGpt {
             CredentialSource::Subscription {
-                registration: Some(cocoa::chatgpt::client(None)?.active_registration()?),
+                registration: Some(crate::chatgpt::client(None)?.active_registration()?),
             }
         } else if kind == ProviderKind::Ollama {
             CredentialSource::None
@@ -1296,7 +1310,7 @@ pub fn catalogue_provider(kind: ProviderKind) -> Result<Option<ResolvedAlias>, C
         }) {
             return Err(ConfigError::CredentialReference);
         }
-        let registration = match cocoa::chatgpt::client(None)?.active_registration() {
+        let registration = match crate::chatgpt::client(None)?.active_registration() {
             Ok(registration) => registration,
             Err(cocoa_oauth::OAuthError::Reauthorize) if provider.is_none() => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -1490,12 +1504,13 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
                 priority: 0,
                 fallback_only: false,
                 reasoning_summary: false,
+                context_tokens: None,
             };
             Some((identifier, vec![alias]))
         }
         None => None,
     };
-    cocoa::mcp::validate_servers(&file.mcp_servers)?;
+    crate::mcp::validate_servers(&file.mcp_servers)?;
     if file.aliases.len() > 32
         || file.aliases.values().map(Vec::len).sum::<usize>() > 256
         || !file
@@ -1672,7 +1687,10 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
                     .clone()
                     .unwrap_or_else(|| kind.endpoint_default().into()),
                 model: alias.model.clone(),
-                model_limits: ModelLimits::default(),
+                model_limits: ModelLimits {
+                    output_tokens: None,
+                    context_tokens: alias.context_tokens,
+                },
                 api_key: None,
                 thinking_level: alias.thinking_level,
                 reasoning_summary: alias.reasoning_summary,
@@ -1760,8 +1778,8 @@ fn validate_alias(alias: &ResolvedAlias) -> Result<(), ConfigError> {
     let mut provider = if alias.kind == ProviderKind::ChatGpt {
         cocoa_llm::Provider::chatgpt(
             options,
-            std::sync::Arc::new(cocoa::chatgpt::Credentials::new(
-                cocoa::chatgpt::client(None)?,
+            std::sync::Arc::new(crate::chatgpt::Credentials::new(
+                crate::chatgpt::client(None)?,
                 "configuration-validation".into(),
             )),
         )
@@ -1769,6 +1787,9 @@ fn validate_alias(alias: &ResolvedAlias) -> Result<(), ConfigError> {
         cocoa_llm::Provider::new(options)
     }
     .map_err(ConfigError::AliasOptions)?;
+    provider
+        .set_model_limits(alias.model_limits)
+        .map_err(ConfigError::AliasOptions)?;
     if alias.reasoning_summary {
         provider
             .enable_reasoning_summary()

@@ -1,14 +1,18 @@
 //! Bounded, credential-isolated model discovery for known catalogue routes.
 
+use std::{collections::BTreeMap, time::Duration};
+
 use cocoa_llm::{ModelLimits, ProviderKind, ThinkingLevel};
+use futures_util::{StreamExt, stream};
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
-use std::time::Duration;
 
-pub(crate) const PROVIDERS: [ProviderKind; ProviderKind::ALL.len()] = ProviderKind::ALL;
+/// Provider profiles in discovery order, also bounding concurrent account discovery.
+pub const PROVIDERS: [ProviderKind; ProviderKind::ALL.len()] = ProviderKind::ALL;
 
+/// One advertised or configured model and its available provider metadata.
 #[derive(Clone)]
-pub(crate) struct Model {
+pub struct Model {
     pub provider: ProviderKind,
     pub id: String,
     pub display_name: Option<String>,
@@ -17,20 +21,23 @@ pub(crate) struct Model {
     pub limits: ModelLimits,
 }
 
+/// Explicit provider effort choices take precedence over supplementary metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Efforts {
+pub enum Efforts {
     Provider(Vec<ThinkingLevel>),
     Unrestricted,
     ModelsDev(Vec<ThinkingLevel>),
 }
 
-pub(crate) struct Catalogue {
+/// Discovered models and provider profiles whose catalogues could not be read.
+pub struct Catalogue {
     pub models: Vec<Model>,
     pub unavailable: Vec<ProviderKind>,
 }
 
+/// Sanitized discovery failures, without credential or response-body details.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ConnectError {
+pub enum ConnectError {
     #[error("Provider credential rejected. Reconnect or choose another provider.")]
     Rejected,
     #[error("Model discovery unavailable. Retry or enter a known tool-capable model ID.")]
@@ -38,6 +45,7 @@ pub(crate) enum ConnectError {
 }
 
 impl Efforts {
+    /// Whether this catalogue permits the requested thinking level.
     pub fn supports(&self, level: ThinkingLevel) -> bool {
         match self {
             Self::Provider(levels) | Self::ModelsDev(levels) => levels.contains(&level),
@@ -163,13 +171,14 @@ impl Catalogue {
             else {
                 continue;
             };
-            model.limits = ModelLimits {
-                output_tokens: entry
-                    .pointer("/limit/output")
-                    .and_then(Value::as_u64)
-                    .and_then(|tokens| u32::try_from(tokens).ok())
-                    .filter(|&tokens| tokens > 0),
-            };
+            model.limits.output_tokens = model
+                .limits
+                .output_tokens
+                .or_else(|| token_limit(&entry["limit"]["output"]));
+            model.limits.context_tokens = model
+                .limits
+                .context_tokens
+                .or_else(|| token_limit(&entry["limit"]["context"]));
             if model.efforts.is_some() {
                 continue;
             }
@@ -202,52 +211,141 @@ impl Catalogue {
     }
 }
 
-pub(crate) async fn resolve_limits(
-    aliases: &mut std::collections::BTreeMap<String, Vec<crate::config::ResolvedAlias>>,
-) {
-    let mut catalogue = Catalogue {
-        models: aliases
-            .values()
-            .flatten()
-            .filter(|alias| {
-                !matches!(alias.kind, ProviderKind::Ollama | ProviderKind::ChatGpt)
-                    && alias.endpoint == alias.kind.endpoint_default()
-            })
-            .map(|alias| Model {
-                provider: alias.kind,
-                id: alias.model.clone(),
-                display_name: None,
-                efforts: None,
-                none_allowed: true,
-                limits: ModelLimits::default(),
-            })
-            .collect(),
-        unavailable: Vec::new(),
-    };
-    if catalogue.models.is_empty() {
-        return;
+/// Fill missing limits for default hosted endpoints without sharing account metadata.
+/// ChatGPT needs only a context window; a pinned context never triggers discovery.
+/// Discovery failures leave limits absent for the host's fallback policy.
+pub async fn resolve_limits(aliases: &mut BTreeMap<String, Vec<crate::config::ResolvedAlias>>) {
+    let mut groups = LimitDiscovery::prepare(aliases);
+    let mut jobs = stream::iter(&mut groups)
+        .map(|group| async move {
+                match discover_provider_checked(group.provider.clone()).await {
+                    Ok(models) => {
+                        for existing in &mut group.catalogue.models {
+                            if let Some(model) = models.iter().find(|model| model.id == existing.id) {
+                                *existing = model.clone();
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(kind = %group.provider.kind, %error, "provider token metadata unavailable");
+                    }
+                }
+        })
+        .buffer_unordered(PROVIDERS.len());
+    while jobs.next().await.is_some() {}
+    drop(jobs);
+    if groups
+        .iter()
+        .flat_map(|group| &group.catalogue.models)
+        .any(|model| {
+            !matches!(model.provider, ProviderKind::ChatGpt | ProviderKind::Ollama)
+                && (model.limits.context_tokens.is_none() || model.limits.output_tokens.is_none())
+        })
+    {
+        match fetch("https://models.dev/api.json", None, 16 * 1024 * 1024).await {
+            Some(metadata) => {
+                for group in &mut groups {
+                    group.catalogue.enrich(&metadata);
+                }
+            }
+            None => tracing::warn!("model token metadata unavailable; using host fallback"),
+        }
     }
-    let Some(metadata) = fetch("https://models.dev/api.json", None, 16 * 1024 * 1024).await else {
-        tracing::warn!("model token metadata unavailable; using 32000 output tokens");
-        return;
-    };
-    catalogue.enrich(&metadata);
-    for alias in aliases.values_mut().flatten() {
-        if alias.endpoint == alias.kind.endpoint_default()
-            && let Some(model) = catalogue
+    for group in groups {
+        group.apply(aliases);
+    }
+}
+
+/// Missing model limits for one provider endpoint and captured credential source.
+/// The caller fills the catalogue before applying it to matching aliases.
+pub struct LimitDiscovery {
+    pub provider: crate::config::ResolvedAlias,
+    pub catalogue: Catalogue,
+}
+
+impl LimitDiscovery {
+    /// Group aliases needing hosted discovery without resolving credentials or doing I/O.
+    /// Pinned ChatGPT windows, complete limits and custom/local endpoints need no job.
+    /// Alias overrides never seed another alias's catalogue defaults.
+    pub fn prepare(aliases: &BTreeMap<String, Vec<crate::config::ResolvedAlias>>) -> Vec<Self> {
+        let mut groups: Vec<Self> = Vec::new();
+        for alias in aliases.values().flatten().filter(|alias| {
+            alias.endpoint == alias.kind.endpoint_default()
+                && alias.kind != ProviderKind::Ollama
+                && (alias.model_limits.context_tokens.is_none()
+                    || (alias.kind != ProviderKind::ChatGpt
+                        && alias.model_limits.output_tokens.is_none()))
+        }) {
+            let index = match groups.iter().position(|group| group.matches(alias)) {
+                Some(index) => index,
+                None => {
+                    groups.push(Self {
+                        provider: alias.clone(),
+                        catalogue: Catalogue {
+                            models: Vec::new(),
+                            unavailable: Vec::new(),
+                        },
+                    });
+                    groups.len() - 1
+                }
+            };
+            let catalogue = &mut groups[index].catalogue;
+            if !catalogue.models.iter().any(|model| model.id == alias.model) {
+                catalogue.models.push(Model {
+                    provider: alias.kind,
+                    id: alias.model.clone(),
+                    display_name: None,
+                    efforts: None,
+                    none_allowed: true,
+                    limits: ModelLimits::default(),
+                });
+            }
+        }
+        groups
+    }
+
+    /// Fill missing limits for exact model/account matches, preserving every override.
+    pub fn apply(&self, aliases: &mut BTreeMap<String, Vec<crate::config::ResolvedAlias>>) {
+        for alias in aliases
+            .values_mut()
+            .flatten()
+            .filter(|alias| self.matches(alias))
+        {
+            if let Some(model) = self
+                .catalogue
                 .models
                 .iter()
-                .find(|model| model.provider == alias.kind && model.id == alias.model)
-        {
-            alias.model_limits = model.limits;
+                .find(|model| model.id == alias.model)
+            {
+                alias.model_limits.output_tokens = alias
+                    .model_limits
+                    .output_tokens
+                    .or(model.limits.output_tokens);
+                alias.model_limits.context_tokens = alias
+                    .model_limits
+                    .context_tokens
+                    .or(model.limits.context_tokens);
+            }
         }
+    }
+
+    fn matches(&self, alias: &crate::config::ResolvedAlias) -> bool {
+        self.provider.kind == alias.kind
+            && self.provider.endpoint == alias.endpoint
+            && self.provider.credential_source == alias.credential_source
+            && self
+                .provider
+                .api_key
+                .as_ref()
+                .map(ExposeSecret::expose_secret)
+                == alias.api_key.as_ref().map(ExposeSecret::expose_secret)
     }
 }
 
 /// Discover configured providers without running credential commands on the async thread.
 /// Resolve one provider configuration at a time and admit at most `PROVIDERS.len()`
 /// discovery jobs. Credential-command and HTTP deadlines remain independent.
-pub(crate) async fn discover() -> Catalogue {
+pub async fn discover() -> Catalogue {
     let mut jobs = tokio::task::JoinSet::new();
     let mut catalogue = Catalogue {
         models: Vec::new(),
@@ -318,7 +416,9 @@ pub(crate) async fn discover() -> Catalogue {
         }
     }
     if catalogue.models.iter().any(|model| {
-        model.efforts.is_none()
+        (model.efforts.is_none()
+            || model.limits.context_tokens.is_none()
+            || model.limits.output_tokens.is_none())
             && !matches!(model.provider, ProviderKind::Ollama | ProviderKind::ChatGpt)
     }) {
         match fetch("https://models.dev/api.json", None, 16 * 1024 * 1024).await {
@@ -350,9 +450,7 @@ pub(crate) async fn discover() -> Catalogue {
 /// # Errors
 /// Return `Rejected` for credential resolution or authorization failures and
 /// `Unavailable` for unsupported routes, worker failures or unavailable catalogues.
-pub(crate) async fn connect(
-    provider: crate::config::ResolvedAlias,
-) -> Result<Catalogue, ConnectError> {
+pub async fn connect(provider: crate::config::ResolvedAlias) -> Result<Catalogue, ConnectError> {
     if provider.endpoint != provider.kind.endpoint_default() {
         return Err(ConnectError::Unavailable);
     }
@@ -370,7 +468,11 @@ pub(crate) async fn connect(
         unavailable: Vec::new(),
     };
     if !matches!(kind, ProviderKind::Ollama | ProviderKind::ChatGpt)
-        && catalogue.models.iter().any(|model| model.efforts.is_none())
+        && catalogue.models.iter().any(|model| {
+            model.efforts.is_none()
+                || model.limits.context_tokens.is_none()
+                || model.limits.output_tokens.is_none()
+        })
         && let Some(metadata) = fetch("https://models.dev/api.json", None, 16 * 1024 * 1024).await
     {
         catalogue.enrich(&metadata);
@@ -378,46 +480,28 @@ pub(crate) async fn connect(
     Ok(catalogue)
 }
 
-async fn discover_provider(provider: crate::config::ResolvedAlias) -> Option<Vec<Model>> {
-    discover_provider_checked(provider).await.ok()
-}
-
-async fn discover_provider_checked(
-    provider: crate::config::ResolvedAlias,
-) -> Result<Vec<Model>, ConnectError> {
-    let kind = provider.kind;
-    // Custom inference paths do not establish permission to send keys to a guessed route.
-    if provider.endpoint != kind.endpoint_default() {
-        return Err(ConnectError::Unavailable);
-    }
-    let url = match kind {
+/// Known provider catalogue routes. Custom inference endpoints do not use these routes.
+pub fn discovery_url(kind: ProviderKind) -> Option<&'static str> {
+    Some(match kind {
         ProviderKind::OpenAi | ProviderKind::ChatGpt => "https://api.openai.com/v1/models",
         ProviderKind::OpenCodeGo => "https://opencode.ai/inference/go/v1/models",
         ProviderKind::Baseten => "https://inference.baseten.co/v1/models",
         ProviderKind::Ollama => "http://127.0.0.1:11434/v1/models",
+        ProviderKind::Anthropic => "https://api.anthropic.com/v1/models?limit=1000",
         ProviderKind::OpenRouter => {
             "https://openrouter.ai/api/v1/models?output_modalities=text&endpoints=%2Fapi%2Fv1%2Fresponses&supported_parameters=tools"
         }
-        _ => return Err(ConnectError::Unavailable),
-    };
-    let key = if kind == ProviderKind::ChatGpt {
-        let source = provider
-            .subscription_credentials()
-            .map_err(|_| ConnectError::Rejected)?
-            .ok_or(ConnectError::Rejected)?;
-        Some(source.resolve().await.map_err(|_| ConnectError::Rejected)?)
-    } else if matches!(kind, ProviderKind::OpenAi | ProviderKind::Baseten) {
-        Some(
-            resolve_api_key(provider)
-                .await?
-                .ok_or(ConnectError::Rejected)?,
-        )
-    } else {
-        None
-    };
-    let value = fetch_checked(url, key, 4 * 1024 * 1024).await?;
+        _ => return None,
+    })
+}
+
+/// Parse the selected provider's catalogue schema without guessing other providers' fields.
+///
+/// # Errors
+/// Return `Unavailable` for malformed catalogue envelopes or oversized model lists.
+pub fn parse_models(kind: ProviderKind, value: &Value) -> Result<Vec<Model>, ConnectError> {
     if kind == ProviderKind::ChatGpt {
-        return parse_chatgpt(&value);
+        return parse_chatgpt(value);
     }
     let data = value.get("data").ok_or(ConnectError::Unavailable)?;
     if data.is_null() {
@@ -471,10 +555,73 @@ async fn discover_provider_checked(
             display_name: None,
             efforts,
             none_allowed: entry.pointer("/reasoning/mandatory") != Some(&Value::Bool(true)),
-            limits: ModelLimits::default(),
+            limits: match kind {
+                ProviderKind::Anthropic => ModelLimits {
+                    output_tokens: token_limit(&entry["max_tokens"]),
+                    context_tokens: token_limit(&entry["max_input_tokens"]),
+                },
+                ProviderKind::OpenRouter => ModelLimits {
+                    output_tokens: token_limit(&entry["top_provider"]["max_completion_tokens"]),
+                    context_tokens: token_limit(&entry["context_length"]),
+                },
+                _ => ModelLimits::default(),
+            },
         });
     }
     Ok(models)
+}
+
+/// Build a catalogue GET using the selected route's authentication scheme.
+/// Public catalogues pass no key; Anthropic also requires its API version.
+/// The caller must trust `url`; this function does not validate provider endpoints.
+pub fn catalogue_request(
+    client: &reqwest::Client,
+    url: &str,
+    key: Option<SecretString>,
+) -> reqwest::RequestBuilder {
+    let mut request = client.get(url);
+    if url.starts_with("https://api.anthropic.com/") {
+        request = request.header("anthropic-version", "2026-10-21");
+    }
+    if let Some(key) = key {
+        request = request.bearer_auth(key.expose_secret());
+    }
+    request
+}
+
+async fn discover_provider(provider: crate::config::ResolvedAlias) -> Option<Vec<Model>> {
+    discover_provider_checked(provider).await.ok()
+}
+
+async fn discover_provider_checked(
+    provider: crate::config::ResolvedAlias,
+) -> Result<Vec<Model>, ConnectError> {
+    let kind = provider.kind;
+    // Custom inference paths do not establish permission to send keys to a guessed route.
+    if provider.endpoint != kind.endpoint_default() {
+        return Err(ConnectError::Unavailable);
+    }
+    let url = discovery_url(kind).ok_or(ConnectError::Unavailable)?;
+    let key = if kind == ProviderKind::ChatGpt {
+        let source = provider
+            .subscription_credentials()
+            .map_err(|_| ConnectError::Rejected)?
+            .ok_or(ConnectError::Rejected)?;
+        Some(source.resolve().await.map_err(|_| ConnectError::Rejected)?)
+    } else if matches!(
+        kind,
+        ProviderKind::OpenAi | ProviderKind::Baseten | ProviderKind::Anthropic
+    ) {
+        Some(
+            resolve_api_key(provider)
+                .await?
+                .ok_or(ConnectError::Rejected)?,
+        )
+    } else {
+        None
+    };
+    let value = fetch_checked(url, key, 4 * 1024 * 1024).await?;
+    parse_models(kind, &value)
 }
 
 fn parse_chatgpt(value: &Value) -> Result<Vec<Model>, ConnectError> {
@@ -509,10 +656,20 @@ fn parse_chatgpt(value: &Value) -> Result<Vec<Model>, ConnectError> {
             display_name: Some(label.into()),
             efforts: None,
             none_allowed: true,
-            limits: ModelLimits::default(),
+            limits: ModelLimits {
+                output_tokens: None,
+                context_tokens: token_limit(&entry["context_window"]),
+            },
         });
     }
     Ok(models)
+}
+
+fn token_limit(value: &Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|tokens| u32::try_from(tokens).ok())
+        .filter(|&tokens| tokens > 0)
 }
 
 async fn resolve_api_key(
@@ -540,11 +697,7 @@ async fn fetch_checked(
         .timeout(Duration::from_secs(4))
         .build()
         .map_err(|_| ConnectError::Unavailable)?;
-    let mut request = client.get(url);
-    if let Some(key) = key {
-        request = request.bearer_auth(key.expose_secret());
-    }
-    let mut response = request
+    let mut response = catalogue_request(&client, url, key)
         .send()
         .await
         .map_err(|_| ConnectError::Unavailable)?;
