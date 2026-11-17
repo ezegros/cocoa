@@ -814,7 +814,7 @@ async fn cancellation_and_deadline_interrupt_headers_and_partial_bodies()
 }
 
 #[tokio::test]
-async fn failed_posts_and_provider_rejections_are_redacted_and_never_replayed()
+async fn failed_posts_are_not_replayed_and_http_retries_remain_redacted()
 -> Result<(), Box<dyn Error>> {
     for status in [400, 401, 403, 500] {
         let server = MockServer::start().await;
@@ -846,7 +846,7 @@ async fn failed_posts_and_provider_rejections_are_redacted_and_never_replayed()
                 .await
                 .ok_or("requests missing")?
                 .len(),
-            1
+            if status == 500 { 4 } else { 1 }
         );
         engine.shutdown().await?;
     }

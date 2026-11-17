@@ -1524,10 +1524,20 @@ async fn startup_fallback_orders_root_and_child_choices_and_pins_resume()
             let (mut stream, body, _) = request(&listener)?;
             assert_eq!(body["model"], model, "round {round}");
             match round {
-                0 | 1 | 2 | 4 => write!(
-                    stream,
-                    "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )?,
+                0 | 1 | 2 | 4 => {
+                    write!(
+                        stream,
+                        "HTTP/1.1 503 Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )?;
+                    for _ in 0..3 {
+                        let (mut stream, retry_body, _) = request(&listener)?;
+                        assert_eq!(retry_body, body);
+                        write!(
+                            stream,
+                            "HTTP/1.1 503 Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )?;
+                    }
+                }
                 3 => {
                     assert_eq!(body["reasoning"]["effort"], "high");
                     respond(
@@ -1640,12 +1650,14 @@ fn partial_output_ambiguous_failures_and_later_rejections_never_trigger_startup_
                     "text/event-stream",
                     &completion("initial model verified"),
                 )?;
-                let (mut stream, body, _) = request(&listener)?;
-                assert_eq!(body["model"], "root-model");
-                write!(
-                    stream,
-                    "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )?;
+                for _ in 0..4 {
+                    let (mut stream, body, _) = request(&listener)?;
+                    assert_eq!(body["model"], "root-model");
+                    write!(
+                        stream,
+                        "HTTP/1.1 503 Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )?;
+                }
             }
             Ok(listener)
         });

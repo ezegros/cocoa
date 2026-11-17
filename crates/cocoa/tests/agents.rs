@@ -1291,24 +1291,177 @@ async fn process_handles_survive_turns_and_share_named_waits_with_agents()
         "started"
     );
     assert!(!directory.path().join("count").exists());
-    std::fs::write(directory.path().join("release"), "")?;
-    assert_eq!(
-        engine
-            .run(
-                RunRequest {
-                    input: "collect".into()
-                },
-                CancellationToken::new()
-            )
-            .await?
-            .answer,
-        "collected"
-    );
+    {
+        let collecting = engine.run(
+            RunRequest {
+                input: "collect".into(),
+            },
+            CancellationToken::new(),
+        );
+        tokio::pin!(collecting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut collecting)
+                .await
+                .is_err(),
+            "ordinary mixed waits must still await a running process"
+        );
+        std::fs::write(directory.path().join("release"), "")?;
+        assert_eq!(collecting.await?.answer, "collected");
+    }
     assert_eq!(
         std::fs::read_to_string(directory.path().join("count"))?,
         "x"
     );
     engine.shutdown().await?;
+    manager.shutdown().await?;
+    local.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn paused_children_retain_their_runtime_and_recover_independently()
+-> Result<(), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let local = Arc::new(
+        LocalEnvironment::new(
+            LocalConfiguration {
+                working_directory: directory.path().into(),
+                output_directory: directory.path().into(),
+                shell: "/bin/bash".into(),
+                environment: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
+            },
+            CodingLimits {
+                file_bytes: 4096,
+                observed_bytes: 16384,
+                observations: 16,
+                processes: 2,
+                captured_output_bytes: 4096,
+                retained_output_bytes: 16384,
+                preview_lines: 200,
+                default_timeout: Duration::from_secs(5),
+            },
+        )
+        .await?,
+    );
+    let recovering = Arc::new(Script::new(
+        vec![
+            Step::Cell(
+                "var retained = 41; await context.set('effect',{type:'observation',value:retained}); print(retained);",
+                vec![json!(41)],
+            ),
+            Step::Fail,
+            Step::Cell("print(retained + 1);", vec![json!(42)]),
+            Step::Answer("recovered"),
+        ],
+        false,
+    ));
+    let cancelled = Arc::new(Script::new(
+        vec![Step::Fail, Step::Answer("must not run")],
+        false,
+    ));
+    let factory = Arc::new(Factory::new([
+        ("recovering", recovering.clone()),
+        ("cancelled", cancelled.clone()),
+    ]));
+    let manager = manager(factory.clone(), 2, 2)?;
+    let mut updates = manager.subscribe();
+    updates.enable_recovery().await?;
+    let host = manager.bind(
+        "medium".into(),
+        Arc::new(cocoa_tools::CodingCapabilities::new(local.clone())),
+    )?;
+    let process = call(
+        &host,
+        "cocoa.run",
+        json!({"command":"while [ ! -f release ]; do sleep 0.01; done; printf survived"}),
+    )
+    .await?;
+    let first = spawn(&host, "recovering", "first", "medium").await?;
+    let second = spawn(&host, "cancelled", "second", "medium").await?;
+    let mut failures = BTreeMap::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while failures.len() < 2 {
+            if let Some(failure) = updates.try_failure() {
+                failures.insert(failure.name.clone(), failure);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let paused = tokio::time::timeout(
+        Duration::from_millis(200),
+        wait(&host, json!({"first":first,"second":second}), None, 4096),
+    )
+    .await??;
+    assert_eq!(
+        paused["first"],
+        json!({"name":"recovering","status":"pending","state":"provider_paused"})
+    );
+    assert_eq!(paused["second"]["state"], "provider_paused");
+    assert!(manager.has_active_agents().await?);
+    assert!(factory.closed.lock().await.is_empty());
+    assert!(updates.drain().iter().any(|update| matches!(&update.kind, AgentUpdateKind::ProviderPaused { reason } if !reason.contains("private"))));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        updates.drain().is_empty(),
+        "unchanged pauses must not invalidate rendered interaction targets"
+    );
+    let mixed = tokio::time::timeout(
+        Duration::from_millis(500),
+        wait(
+            &host,
+            json!({"worker":first,"build":process["reference"]}),
+            Some(4000),
+            4096,
+        ),
+    )
+    .await??;
+    assert_eq!(mixed["worker"]["state"], "provider_paused");
+    assert_eq!(mixed["build"]["status"]["kind"], "running");
+    std::fs::write(directory.path().join("release"), "")?;
+    let completed = wait(
+        &host,
+        json!({"build":process["reference"]}),
+        Some(1000),
+        4096,
+    )
+    .await?;
+    assert_eq!(
+        completed["build"]["status"],
+        json!({"kind":"exited","code":0})
+    );
+    assert_eq!(completed["build"]["stdout"]["text"], "survived");
+    assert_eq!(recovering.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(cancelled.requests.load(Ordering::SeqCst), 1);
+    let failure = failures.remove("recovering").ok_or("missing retry")?;
+    failure
+        .failure
+        .retry
+        .send(())
+        .map_err(|()| "child stopped before retry")?;
+    let cancelled_failure = failures.remove("cancelled").ok_or("missing cancellation")?;
+    cancelled_failure.cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let result = wait(
+                &host,
+                json!({"first":first,"second":second}),
+                Some(10),
+                4096,
+            )
+            .await?;
+            if result["first"]["status"] != "pending" && result["second"]["status"] != "pending" {
+                break Ok::<_, CapabilityError>(result);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    assert_eq!(result["first"]["answer"], "recovered");
+    assert_eq!(result["second"]["status"], "cancelled");
+    assert_eq!(cancelled.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.created.load(Ordering::SeqCst), 2);
+    assert!(!manager.has_active_agents().await?);
     manager.shutdown().await?;
     local.close().await?;
     Ok(())

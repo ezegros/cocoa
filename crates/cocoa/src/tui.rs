@@ -1,6 +1,7 @@
 //! Fixed-rate terminal input and rendering without a detached input worker.
 
 use std::{
+    collections::VecDeque,
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
@@ -22,8 +23,9 @@ use cocoa::{
     chat::{Action, Chat, ImagePath},
     persistence::{PersistenceError, SessionAttachment, SessionDatabase, StoredSessionSettings},
 };
-use cocoa_core::engine::{Engine, EventKind, EventReceiver, Observation, RunError, RunRequest};
-use cocoa_core::model::ModelError;
+use cocoa_core::engine::{
+    Engine, EventKind, EventReceiver, Observation, ProviderFailure, RunError, RunRequest,
+};
 use cocoa_llm::ThinkingLevel;
 #[cfg(unix)]
 use crossterm::event::{
@@ -344,6 +346,7 @@ async fn session(
     let mut dirty = true;
     let mut animation_clock = Instant::now();
     let mut events = owned.as_ref().map(|active| active.events.subscribe());
+    let mut recoveries = ProviderRecoveries::default();
     loop {
         tokio::select! {
             biased;
@@ -356,7 +359,9 @@ async fn session(
                     reconcile(chat, &active.engine, &mut dirty).await;
                 }
                 if let Some(active) = owned.as_mut() {
+                    active.agent_updates.enable_recovery().await.map_err(|error| SessionError::Recovery(Box::new(crate::session::CommandError::Agents(error))))?;
                     agent_observations(chat, &mut active.agent_updates, &mut dirty);
+                    dirty |= recoveries.poll(&mut active.agent_updates, chat, commands, Status::Idle);
                 }
                 let polled = commands.poll(chat).await;
                 dirty |= polled.changed;
@@ -375,6 +380,8 @@ async fn session(
                         Err(error) => chat.notice(&error.to_string()),
                     }
                 }
+                // Observations can invalidate mouse targets from the previous frame.
+                draw(terminal, chat, commands, &mut dirty, &mut animation_clock, now)?;
                 let action = if commands.dialog.as_ref().is_some_and(Dialog::is_onboarding) {
                     keyboard(chat, commands, &mut dirty)?
                 } else if let Some(prompt) = prompt.take() {
@@ -388,6 +395,10 @@ async fn session(
                 };
                 match action {
                     Action::Exit => return Ok(()),
+                    Action::Retry | Action::Cancel if !recoveries.pending.is_empty() => {
+                        recoveries.decide(action, chat, commands, Status::Idle);
+                        dirty = true;
+                    }
                     Action::Command(command) => {
                         if command == "/rewind-close" {
                             commands.rewind = None;
@@ -554,8 +565,9 @@ async fn session(
                                 Ok(skills) => chat.set_skills(skills),
                                 Err(error) => chat.notice(&format!("Cannot discover skill commands: {error}")),
                             }
-                            if matches!(action, config::SessionAction::Resume(_)) {
-                                if let Some(attachment) = &target.attachment { chat.notice(&format!("Session {}", attachment.public_id())); }
+                            if matches!(action, config::SessionAction::Resume(_))
+                                && let Some(attachment) = &target.attachment {
+                                chat.notice(&format!("Session {}", attachment.public_id()));
                             }
                             if target.relocated { chat.notice(&format!("Session relocated to {}", working_directory.display())); }
                             if let Some(active) = &target.session { commands.mcp = Some(active.mcp.clone()); chat.set_message_steering(active.message_steering); }
@@ -657,6 +669,7 @@ async fn session(
                             }
                         }
                         let Some(active) = owned.as_mut() else { unreachable!("session initialized above"); };
+                        active.agent_updates.enable_recovery().await.map_err(|error| SessionError::Recovery(Box::new(crate::session::CommandError::Agents(error))))?;
                         if input.bytes() > active.input_bytes { chat.reject("Prompt exceeds the configured input byte budget."); commands.status = Status::Error; dirty = true; continue; }
                         chat.set_input_bytes(active.input_bytes)?;
                         chat.set_message_steering(active.message_steering);
@@ -672,7 +685,6 @@ async fn session(
                         tokio::pin!(invocation);
                         let mut exit_requested = false;
                         let mut terminal_error = None;
-                        let mut retry = None;
                         let mut observations_open = true;
                         loop {
                             tokio::select! {
@@ -704,16 +716,7 @@ async fn session(
                                     observations(chat, receiver, &mut dirty).await;
                                     agent_observations(chat, agent_updates, &mut dirty);
                                     show_pinned_selection(chat, &directory_label, attachment).await;
-                                    let reason = match failure.error {
-                                        ModelError::Transport { message } | ModelError::Rejected { message } => format!("{message}. Retry or cancel this turn."),
-                                        ModelError::ContextLimit { input_tokens, input_limit } => format!("Input needs {input_tokens} tokens but the context budget allows {input_limit}. The request was not sent. Cancel this turn to change the model or input."),
-                                        ModelError::Protocol { .. } => "Provider returned an invalid response. Try again or cancel this turn.".into(),
-                                        ModelError::Stalled => "Provider response timed out. Try again or cancel this turn.".into(),
-                                        ModelError::Cancelled => unreachable!("cancelled requests do not ask for retry"),
-                                    };
-                                    retry = Some(failure.retry);
-                                    chat.provider_paused(&reason);
-                                    commands.status = Status::Blocked { kind: Kind::Question, message: "Provider paused; retry or cancel this turn" };
+                                    recoveries.push("Root agent".into(), failure, cancellation.clone(), chat, commands);
                                     dirty = true;
                                 }
                                 now = tick.tick() => {
@@ -729,13 +732,8 @@ async fn session(
                                                 chat.reject_steering("Steering queue is full. Your draft is unchanged; submit after the next model round.");
                                             }
                                         },
-                                        Ok(Action::Retry) => {
-                                            if let Some(retry) = retry.take() {
-                                                match retry.send(()) {
-                                                    Ok(()) => { chat.provider_resumed(); commands.status = Status::Working("Retrying provider request"); },
-                                                    Err(()) => { cancellation.cancel(); chat.stopping(); commands.status = Status::Working("Stopping"); },
-                                                }
-                                            }
+                                        Ok(action @ (Action::Retry | Action::Cancel)) if !recoveries.pending.is_empty() => {
+                                            recoveries.decide(action, chat, commands, Status::Working("Running agent"));
                                         },
                                         Ok(Action::Cancel) => { cancellation.cancel(); chat.stopping(); commands.status = Status::Working("Stopping"); },
                                         Ok(Action::Exit) => { exit_requested = true; cancellation.cancel(); commands.status = Status::Working("Stopping"); },
@@ -767,6 +765,7 @@ async fn session(
                                         _ => {},
                                     }
                                     agent_observations(chat, agent_updates, &mut dirty);
+                                    dirty |= recoveries.poll(agent_updates, chat, commands, Status::Working("Running agent"));
                                     if let Err(error) = draw(terminal, chat, commands, &mut dirty, &mut animation_clock, now) {
                                         cancellation.cancel();
                                         terminal_error = Some(error);
@@ -791,14 +790,16 @@ async fn session(
                         if !messages.is_empty() {
                             chat.notice(&format!("{} queued steering messages were not delivered before this turn ended. Use Up to recall the last message.", messages.len()));
                         }
-                        // Consume keys received while busy before settlement enables submission.
-                        chat.stopping();
-                        match keyboard(chat, commands, &mut dirty)? {
-                            Action::Exit => return Ok(()),
-                            Action::Cancel | Action::Retry | Action::None | Action::Redraw => {},
-                            Action::Command(_) | Action::SelectAliasChoice { .. } => chat.input_notice("Turn finishing. Try the command again after it settles."),
-                            Action::Submit(_) | Action::Steer(_) | Action::CycleAlias | Action::CycleAliasPrevious => unreachable!("stopping composer cannot submit or change aliases"),
-                            Action::Copy(_) | Action::Paste => unreachable!("keyboard handles clipboard access"),
+                        // Leave child recovery keys queued when the parent finishes.
+                        if recoveries.pending.is_empty() {
+                            chat.stopping();
+                            match keyboard(chat, commands, &mut dirty)? {
+                                Action::Exit => return Ok(()),
+                                Action::Cancel | Action::Retry | Action::None | Action::Redraw => {},
+                                Action::Command(_) | Action::SelectAliasChoice { .. } => chat.input_notice("Turn finishing. Try the command again after it settles."),
+                                Action::Submit(_) | Action::Steer(_) | Action::CycleAlias | Action::CycleAliasPrevious => unreachable!("stopping composer cannot submit or change aliases"),
+                                Action::Copy(_) | Action::Paste => unreachable!("keyboard handles clipboard access"),
+                            }
                         }
                         match result {
                             Ok(output) => { chat.complete(&output.answer); commands.status = Status::Done; },
@@ -858,6 +859,8 @@ async fn session(
                                 }
                             },
                         }
+                        let status = commands.status;
+                        recoveries.refresh(chat, commands, status);
                         commands.report_status()?;
                         dirty = true;
                         continue;
@@ -867,6 +870,120 @@ async fn session(
                 draw(terminal, chat, commands, &mut dirty, &mut animation_clock, now)?;
             }
         }
+    }
+}
+
+#[derive(Default)]
+struct ProviderRecoveries {
+    pending: VecDeque<ProviderRecovery>,
+}
+
+struct ProviderRecovery {
+    name: String,
+    failure: ProviderFailure,
+    cancellation: CancellationToken,
+}
+
+impl ProviderRecoveries {
+    fn push(
+        &mut self,
+        name: String,
+        failure: ProviderFailure,
+        cancellation: CancellationToken,
+        chat: &mut Chat,
+        commands: &mut Commands,
+    ) {
+        self.pending.retain(ProviderRecovery::active);
+        let first = self.pending.is_empty();
+        assert!(
+            self.pending.len() < 17,
+            "one root and at most sixteen children can await provider recovery"
+        );
+        self.pending.push_back(ProviderRecovery {
+            name,
+            failure,
+            cancellation,
+        });
+        if first {
+            self.refresh(chat, commands, Status::Idle);
+        }
+    }
+
+    fn poll(
+        &mut self,
+        updates: &mut AgentUpdates,
+        chat: &mut Chat,
+        commands: &mut Commands,
+        fallback: Status,
+    ) -> bool {
+        let stale = self
+            .pending
+            .front()
+            .is_some_and(|pending| !pending.active());
+        if stale {
+            self.refresh(chat, commands, fallback);
+        }
+        let mut changed = stale;
+        for _ in 0..16 {
+            let Some(failure) = updates.try_failure() else {
+                break;
+            };
+            if failure.cancellation.is_cancelled() || failure.failure.retry.is_closed() {
+                continue;
+            }
+            self.push(
+                format!("{} [agent {}]", failure.name, i64::from(failure.agent)),
+                failure.failure,
+                failure.cancellation,
+                chat,
+                commands,
+            );
+            changed = true;
+        }
+        changed
+    }
+
+    fn decide(
+        &mut self,
+        action: Action,
+        chat: &mut Chat,
+        commands: &mut Commands,
+        fallback: Status,
+    ) {
+        if let Some(pending) = self.pending.pop_front() {
+            if action == Action::Retry && pending.active() {
+                if pending.failure.retry.send(()).is_err() {
+                    pending.cancellation.cancel();
+                }
+            } else {
+                pending.cancellation.cancel();
+            }
+        }
+        self.refresh(chat, commands, fallback);
+    }
+
+    fn refresh(&mut self, chat: &mut Chat, commands: &mut Commands, fallback: Status) {
+        self.pending.retain(ProviderRecovery::active);
+        if let Some(pending) = self.pending.front() {
+            chat.provider_paused(&format!(
+                "{}: {} Retry this request or cancel this agent. Completed tool work is retained.",
+                pending.name,
+                pending.failure.error.recovery_description(),
+            ));
+            commands.status = Status::Blocked {
+                kind: Kind::Question,
+                message: "Provider paused; retry or cancel the named agent",
+            };
+        } else {
+            chat.provider_resumed();
+            commands.status = fallback;
+        }
+    }
+}
+
+impl ProviderRecovery {
+    fn active(&self) -> bool {
+        !self.cancellation.is_cancelled() && !self.failure.retry.is_closed()
     }
 }
 

@@ -1282,6 +1282,82 @@ fn input_notices_stay_above_the_composer_and_out_of_history() -> Result<(), Box<
 }
 
 #[test]
+fn child_provider_pauses_survive_parent_progress_and_completion() -> Result<(), Box<dyn Error>> {
+    for width in [100, 40] {
+        let mut chat = Chat::new(512)?;
+        chat.initial_prompt("prepare licenses")?;
+        chat.observe(&Observation::Event(EngineEvent {
+            invocation: InvocationId(1),
+            kind: EventKind::ModelStarted { round: 1 },
+        }));
+        let update = |kind| AgentUpdate {
+            session: 1,
+            agent: fixture_agent("licenses-cli"),
+            name: "licenses-cli".into(),
+            kind,
+        };
+        chat.observe_agent(&update(AgentUpdateKind::Started));
+        chat.observe_agent(&update(AgentUpdateKind::Observation(Observation::Event(
+            EngineEvent {
+                invocation: InvocationId(1),
+                kind: EventKind::ProviderRetryScheduled {
+                    status: 503,
+                    retry_at: std::time::Instant::now() + Duration::from_secs(1),
+                },
+            },
+        ))));
+        let retrying = render(&mut chat, width, 24)?;
+        assert!(retrying.contains("Retrying"), "{retrying}");
+        assert!(!retrying.contains("failed"), "{retrying}");
+        chat.observe_agent(&update(AgentUpdateKind::ProviderPaused {
+            reason: "HTTP status 503".into(),
+        }));
+        chat.provider_paused(
+            "licenses-cli: HTTP status 503. Retry this request or cancel this agent.",
+        );
+        chat.input(key(KeyCode::Down, KeyModifiers::NONE));
+        chat.observe(&Observation::Event(EngineEvent {
+            invocation: InvocationId(1),
+            kind: EventKind::ModelStarted { round: 2 },
+        }));
+        chat.observe(&Observation::Event(EngineEvent {
+            invocation: InvocationId(1),
+            kind: EventKind::AssistantText {
+                text: "Parent can continue".into(),
+                truncated: false,
+            },
+        }));
+        assert!(!chat.can_submit());
+        chat.complete("Parent finished independently");
+        let paused = render(&mut chat, width, 24)?;
+        assert!(paused.contains("Provider paused"), "{paused}");
+        assert!(paused.contains("HTTP status 503"), "{paused}");
+        assert!(!paused.contains("failed"), "{paused}");
+        assert!(!chat.can_submit());
+        chat.provider_paused(
+            "licenses-cli: HTTP status 503. Retry this request or cancel this agent.",
+        );
+        assert_eq!(
+            chat.input(key(KeyCode::Enter, KeyModifiers::NONE)),
+            Action::Cancel
+        );
+        assert_eq!(
+            chat.input(key(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Action::Retry
+        );
+        chat.provider_resumed();
+        chat.observe_agent(&update(AgentUpdateKind::ProviderResumed));
+        chat.observe_agent(&update(AgentUpdateKind::Finished(
+            ActivityStatus::Completed,
+        )));
+        let completed = render(&mut chat, width, 24)?;
+        assert!(!completed.contains("Provider paused"), "{completed}");
+        assert!(chat.can_submit());
+    }
+    Ok(())
+}
+
+#[test]
 fn provider_failures_show_stacked_choices_and_preserve_the_draft() -> Result<(), Box<dyn Error>> {
     for (width, height) in [(96, 24), (36, 18), (20, 12), (20, 8)] {
         let mut chat = Chat::new(256)?;
@@ -1372,6 +1448,7 @@ fn provider_retries_show_a_red_status_and_countdown_without_losing_the_draft()
         (503, "Provider Saturation"),
         (500, "Provider Error"),
     ] {
+        observe_root_event(&mut chat, EventKind::ModelStarted { round: 1 });
         chat.observe(&Observation::Event(EngineEvent {
             invocation: InvocationId(1),
             kind: EventKind::ProviderRetryScheduled {
@@ -1379,7 +1456,7 @@ fn provider_retries_show_a_red_status_and_countdown_without_losing_the_draft()
                 retry_at: std::time::Instant::now() + Duration::from_secs(60),
             },
         }));
-        for width in [80, 36, 35, 32, 20] {
+        for width in [80, 48, 36, 35, 32, 20] {
             let view = render(&mut chat, width, 20)?;
             let rows = view.lines().collect::<Vec<_>>();
             let label_start = rows
@@ -1409,8 +1486,9 @@ fn provider_retries_show_a_red_status_and_countdown_without_losing_the_draft()
             );
             assert!(!view.contains("seconds"), "{view}");
             assert!(view.contains("next draft"), "{view}");
-            if width >= 32 {
+            if width >= 48 {
                 assert!(view.contains("medium"), "{view}");
+                assert!(view.contains("1/3"), "{view}");
             }
             let mut terminal = Terminal::new(TestBackend::new(width, 20))?;
             terminal.draw(|frame| chat.render(frame))?;
@@ -5258,7 +5336,12 @@ fn work_finishes_only_after_the_root_and_every_agent_settle() -> Result<(), Box<
                 kind: AgentUpdateKind::Finished(status),
             });
             let view = render(&mut chat, 64, 32)?;
-            assert_eq!(view.contains("Beta Agent Worked"), !root_first, "{view}");
+            let agent_label = if matches!(status, ActivityStatus::Failed { .. }) {
+                "Beta Agent stopped"
+            } else {
+                "Beta Agent Worked"
+            };
+            assert_eq!(view.contains(agent_label), !root_first, "{view}");
             assert_eq!(view.contains("Work Done ▸"), root_first, "{view}");
             if !root_first {
                 assert!(view.contains("Toasting"), "{view}");

@@ -28,6 +28,41 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 #[test]
+fn provider_recovery_descriptions_preserve_only_allowlisted_diagnostics() {
+    let message = "HTTP status 503; request req_example-42";
+    assert_eq!(
+        ModelError::Rejected {
+            message: message.into()
+        }
+        .recovery_description(),
+        message
+    );
+    for message in [
+        "HTTP status 503; request secret-token",
+        "HTTP status 503\nsecret-token",
+        "HTTP status 000503",
+        "HTTP status 503; request req_secret\nvalue",
+        "secret-token",
+    ] {
+        let description = ModelError::Rejected {
+            message: message.into(),
+        }
+        .recovery_description();
+        assert_eq!(
+            description,
+            "Provider rejected the request. Check account access, usage limits and model settings."
+        );
+    }
+    assert_eq!(
+        ModelError::Transport {
+            message: "secret-token".into()
+        }
+        .recovery_description(),
+        "Provider connection failed."
+    );
+}
+
+#[test]
 fn host_payload_fit_accounts_for_encoded_keys_bytes_nodes_and_depth() {
     use cocoa_core::execution::host_value_fits;
     use serde_json::Value;

@@ -3,7 +3,7 @@
 use std::{
     error::Error,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime},
@@ -11,6 +11,9 @@ use std::{
 
 use async_trait::async_trait;
 use cocoa_core::{
+    accounting::{
+        RequestAccounting, RequestPurpose, RequestRecorder, RequestSettings, RequestUpdate,
+    },
     capability::{CapabilityDescription, CapabilityError, CapabilityHost, OperationContext},
     context::{
         BoundedContext, ContextAssembler, ContextContent, ContextError, ContextRecord, ContextType,
@@ -25,7 +28,9 @@ use cocoa_core::{
         FeedbackError as CellError, OperationEffects, ShutdownReport, WorkLimits,
     },
     model::{Image, ModelError, ModelProvider, ModelRequest, ModelResponse, UserInput},
-    store::{AgentId, IdentityError, InMemoryStore, RecordKind, StoreLimits, StoredRecord},
+    store::{
+        AgentId, IdentityError, InMemoryStore, RecordKind, StoreError, StoreLimits, StoredRecord,
+    },
 };
 use cocoa_llm::openai::{ExecutionMode, OpenAiOptions, OpenAiProvider, ThinkingLevel};
 use cocoa_llm::{CredentialResolver, ModelLimits, Provider, ProviderKind, ProviderOptions};
@@ -4006,6 +4011,7 @@ async fn retry_after_recovers_all_profiles_without_another_model_round()
 -> Result<(), Box<dyn Error>> {
     for kind in [
         ProviderKind::OpenAi,
+        ProviderKind::ChatGpt,
         ProviderKind::OpenCodeGo,
         ProviderKind::Baseten,
         ProviderKind::OpenRouter,
@@ -4015,8 +4021,18 @@ async fn retry_after_recovers_all_profiles_without_another_model_round()
             (429, "0"),
             (503, "Wed, 21 Oct 2015 07:28:00 GMT"),
             (500, "0"),
+            (502, "0"),
+            (504, "0"),
         ] {
-            let server = MockServer::start().await;
+            let local = MockServer::start().await;
+            let subscription = if kind == ProviderKind::ChatGpt {
+                Some(SubscriptionFixture::new().await?)
+            } else {
+                None
+            };
+            let server = subscription
+                .as_ref()
+                .map_or(&local, |fixture| &fixture.server);
             let attempts = AtomicUsize::new(0);
             let body = if kind == ProviderKind::Ollama {
                 chat_chunk(json!({"content":"recovered"}), Value::Null)
@@ -4034,9 +4050,13 @@ async fn retry_after_recovers_all_profiles_without_another_model_round()
                     }
                 })
                 .expect(2)
-                .mount(&server)
+                .mount(server)
                 .await;
-            let model = Provider::new(profile_options(kind, &server.uri()))?;
+            let model = if let Some(fixture) = &subscription {
+                fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?
+            } else {
+                Provider::new(profile_options(kind, &server.uri()))?
+            };
             let (events, mut receiver) = EventPublisher::channel(64, 1024)?;
             let mut engine = assemble_engine(Arc::new(model), Box::new(NoExecution), Some(events))?;
             let output = engine
@@ -4048,6 +4068,8 @@ async fn retry_after_recovers_all_profiles_without_another_model_round()
                 )
                 .await?;
             assert_eq!(output.answer, "recovered");
+            assert_eq!(output.accounting.requests_started, 2);
+            assert_eq!(output.accounting.requests_finished, 2);
             engine.shutdown().await?;
             let mut rounds = 0;
             let mut scheduled = 0;
@@ -4066,7 +4088,15 @@ async fn retry_after_recovers_all_profiles_without_another_model_round()
             assert_eq!((rounds, scheduled, started), (1, 1, 1));
             let requests = server.received_requests().await.ok_or("requests missing")?;
             assert_eq!(requests[0].body, requests[1].body);
-            assert_eq!(requests[0].headers, requests[1].headers);
+            if kind == ProviderKind::ChatGpt {
+                assert_eq!(requests[0].headers["authorization"], "Bearer renewed-0");
+                assert_eq!(requests[1].headers["authorization"], "Bearer renewed-1");
+            } else {
+                assert_eq!(requests[0].headers, requests[1].headers);
+            }
+            if let Some(fixture) = subscription {
+                fixture.shutdown().await?;
+            }
         }
     }
     Ok(())
@@ -4074,8 +4104,23 @@ async fn retry_after_recovers_all_profiles_without_another_model_round()
 
 #[tokio::test]
 async fn retry_waits_survive_stall_windows_but_remain_cancellable() -> Result<(), Box<dyn Error>> {
-    for scenario in ["recover", "cancel", "stall after retry", "http date"] {
-        let server = MockServer::start().await;
+    for (scenario, chatgpt) in [
+        ("recover", false),
+        ("cancel", false),
+        ("stall after retry", false),
+        ("http date", false),
+        ("recover", true),
+        ("cancel", true),
+    ] {
+        let local = MockServer::start().await;
+        let subscription = if chatgpt {
+            Some(SubscriptionFixture::new().await?)
+        } else {
+            None
+        };
+        let server = subscription
+            .as_ref()
+            .map_or(&local, |fixture| &fixture.server);
         let attempts = AtomicUsize::new(0);
         let retry_after = if scenario == "http date" {
             httpdate::fmt_http_date(SystemTime::now() + Duration::from_secs(2))
@@ -4104,14 +4149,16 @@ async fn retry_waits_survive_stall_windows_but_remain_cancellable() -> Result<()
                 }
             })
             .expect(if scenario == "cancel" { 1 } else { 2 })
-            .mount(&server)
+            .mount(server)
             .await;
         let cancellation = CancellationToken::new();
+        let inner = if let Some(fixture) = &subscription {
+            fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?
+        } else {
+            Provider::new(profile_options(ProviderKind::OpenAi, &server.uri()))?
+        };
         let model = RequestControl {
-            inner: provider(
-                format!("{}/v1/responses", server.uri()),
-                ExecutionMode::Disabled,
-            )?,
+            inner,
             output_bytes: 65536,
             timeout: Duration::from_millis(200),
             cancellation: cancellation.clone(),
@@ -4179,26 +4226,32 @@ async fn retry_waits_survive_stall_windows_but_remain_cancellable() -> Result<()
             }
         }
         engine.shutdown().await?;
+        if let Some(fixture) = subscription {
+            fixture.shutdown().await?;
+        }
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn retries_are_bounded_and_exclude_invalid_hints_and_partial_streams()
+async fn retries_are_bounded_with_fallback_and_exclude_excessive_hints_and_partial_streams()
 -> Result<(), Box<dyn Error>> {
     for (status, retry_after, attempts) in [
         (503, Some("0"), 4),
-        (429, None, 1),
-        (503, None, 1),
-        (429, Some("invalid"), 1),
-        (429, Some("-1"), 1),
-        (429, Some("1.5"), 1),
+        (429, None, 4),
+        (503, None, 4),
+        (429, Some("invalid"), 4),
+        (429, Some("-1"), 4),
+        (429, Some("1.5"), 4),
         (503, Some("301"), 1),
         (503, Some("18446744073709551616"), 1),
         (503, Some("Wed, 21 Oct 2099 07:28:00 GMT"), 1),
         (307, Some("0"), 1),
         (400, Some("0"), 1),
         (401, Some("0"), 1),
+        (403, Some("0"), 1),
+        (501, Some("0"), 1),
+        (505, Some("0"), 1),
         (200, Some("0"), 1),
     ] {
         let server = MockServer::start().await;
@@ -4218,6 +4271,7 @@ async fn retries_are_bounded_and_exclude_invalid_hints_and_partial_streams()
             format!("{}/v1/responses", server.uri()),
             ExecutionMode::Disabled,
         )?;
+        let started = tokio::time::Instant::now();
         let result = engine
             .run(
                 RunRequest {
@@ -4230,13 +4284,23 @@ async fn retries_are_bounded_and_exclude_invalid_hints_and_partial_streams()
             matches!(result, Err(RunError::Model(_))),
             "{status} {retry_after:?}: {result:?}"
         );
+        if status != 200 {
+            assert!(
+                matches!(result, Err(RunError::Model(ModelError::Rejected { ref message })) if message == &format!("HTTP status {status}")),
+                "{result:?}"
+            );
+        }
+        if attempts == 4 && retry_after != Some("0") {
+            assert!(started.elapsed() >= Duration::from_secs(7));
+            assert!(started.elapsed() < Duration::from_secs(10));
+        }
         engine.shutdown().await?;
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn redirects_status_failures_and_remote_bodies_are_not_retried_or_disclosed()
+async fn redirects_status_failures_and_remote_bodies_are_not_disclosed()
 -> Result<(), Box<dyn Error>> {
     for status in [307, 401, 429, 503] {
         let destination = MockServer::start().await;
@@ -4251,6 +4315,7 @@ async fn redirects_status_failures_and_remote_bodies_are_not_retried_or_disclose
         Mock::given(method("POST"))
             .respond_with(
                 ResponseTemplate::new(status)
+                    .insert_header("retry-after", "301")
                     .insert_header("location", format!("{}/v1/responses", destination.uri()))
                     .set_body_string("test-secret-never-log remote-secret-body"),
             )
@@ -4296,6 +4361,157 @@ async fn redirects_status_failures_and_remote_bodies_are_not_retried_or_disclose
         engine.shutdown().await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn http_retries_preserve_sanitized_diagnostics_and_per_attempt_accounting()
+-> Result<(), Box<dyn Error>> {
+    for kind in [ProviderKind::OpenAi, ProviderKind::ChatGpt] {
+        for (status, hint, code, request_id, attempts) in [
+            (503, None, "unavailable", "req_safe-123", 4),
+            (429, Some("0"), "rate_limit_exceeded", "req_safe-123", 4),
+            (429, Some("0"), "insufficient_quota", "req_safe-123", 1),
+            (
+                429,
+                Some("0"),
+                "subscription_sharing_usage_limit_exceeded",
+                "req_safe-123",
+                1,
+            ),
+            (503, Some("0"), "invalid_request_error", "req_safe-123", 1),
+            (503, Some("0"), "invalid_token", "req_safe-123", 1),
+            (401, Some("0"), "unauthorized", "req_safe-123", 1),
+            (403, Some("0"), "forbidden", "req_safe-123", 1),
+            (400, Some("0"), "invalid_input", "req_safe-123", 1),
+            (503, Some("301"), "unavailable", "req_safe-123", 1),
+            (503, Some("0"), "unavailable", "remote-secret-body", 4),
+            (503, Some("0"), "unavailable", "req_bad; secret", 4),
+        ] {
+            let local = MockServer::start().await;
+            let subscription = if kind == ProviderKind::ChatGpt {
+                Some(SubscriptionFixture::new().await?)
+            } else {
+                None
+            };
+            let server = subscription
+                .as_ref()
+                .map_or(&local, |fixture| &fixture.server);
+            let mut response = ResponseTemplate::new(status)
+                .insert_header("x-request-id", request_id)
+                .set_body_json(json!({"error":{"code":code,"message":"remote-secret-body renewed-0 test-profile-key"}}));
+            if let Some(hint) = hint {
+                response = response.insert_header("retry-after", hint);
+            }
+            Mock::given(method("POST"))
+                .respond_with(response)
+                .expect(attempts)
+                .mount(server)
+                .await;
+            let inner = if let Some(fixture) = &subscription {
+                fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?
+            } else {
+                Provider::new(profile_options(kind, &server.uri()))?
+            };
+            let evidence = Arc::new(RetryEvidence::default());
+            let model = AccountingProbe {
+                inner,
+                evidence: evidence.clone(),
+            };
+            let mut engine = assemble_engine(Arc::new(model), Box::new(NoExecution), None)?;
+            let started = tokio::time::Instant::now();
+            let result = engine
+                .run(
+                    RunRequest {
+                        input: "reject".into(),
+                    },
+                    CancellationToken::new(),
+                )
+                .await;
+            let expected = if request_id == "req_safe-123" {
+                format!("HTTP status {status}; request {request_id}")
+            } else {
+                format!("HTTP status {status}")
+            };
+            assert!(
+                matches!(result, Err(RunError::Model(ModelError::Rejected { ref message })) if message == &expected),
+                "{kind:?}: {result:?}"
+            );
+            assert_eq!(evidence.starts.load(Ordering::SeqCst), attempts as usize);
+            let updates = evidence
+                .updates
+                .lock()
+                .map_err(|_| "poisoned evidence")?
+                .clone();
+            assert_eq!(updates.len(), attempts as usize);
+            for update in updates {
+                assert_eq!(
+                    update.outcome,
+                    Some(cocoa_core::accounting::RequestOutcome::Rejected)
+                );
+                assert_eq!(
+                    update.error,
+                    Some(format!("model request rejected: {expected}"))
+                );
+                assert!(update.usage.is_none());
+            }
+            if hint.is_none() {
+                assert!(started.elapsed() >= Duration::from_secs(7));
+                assert!(started.elapsed() < Duration::from_secs(10));
+            }
+            engine.shutdown().await?;
+            if let Some(fixture) = subscription {
+                fixture.shutdown().await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct RetryEvidence {
+    starts: AtomicUsize,
+    updates: Mutex<Vec<RequestUpdate>>,
+}
+
+#[async_trait]
+impl RequestRecorder for RetryEvidence {
+    async fn start(
+        &self,
+        _: RequestPurpose,
+        _: Option<&RequestSettings>,
+    ) -> Result<i64, StoreError> {
+        Ok(self.starts.fetch_add(1, Ordering::SeqCst) as i64)
+    }
+
+    async fn update(&self, _: i64, update: &RequestUpdate) -> Result<(), StoreError> {
+        self.updates
+            .lock()
+            .map_err(|_| StoreError::InvalidRecord)?
+            .push(update.clone());
+        Ok(())
+    }
+}
+
+struct AccountingProbe {
+    inner: Provider,
+    evidence: Arc<RetryEvidence>,
+}
+
+#[async_trait]
+impl ModelProvider for AccountingProbe {
+    async fn respond(
+        &self,
+        request: ModelRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ModelResponse, ModelError> {
+        self.inner
+            .respond_accounted(
+                request,
+                cancellation,
+                RequestAccounting::new(Some(self.evidence.clone())),
+            )
+            .await
+    }
 }
 
 #[tokio::test]

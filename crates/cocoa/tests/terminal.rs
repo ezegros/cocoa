@@ -2213,11 +2213,11 @@ fn startup_fallback_updates_the_pinned_model_and_effort_during_work_and_after_re
             session.wait_text("medium · fallback-tools (high)")?;
             capture_session_view(&mut session, "alias-fallback-tools-working")?;
             assert!(!session.screen().contains("failed-primary"));
-            assert!(!session.screen().contains("answer-3"));
-            assert_eq!(server.requests()?.len(), 2, "turn already settled");
+            assert!(!session.screen().contains("answer-6"));
+            assert_eq!(server.requests()?.len(), 5, "turn already settled");
             fs::write(home.join("release-fallback"), "")?;
         }
-        let answer = if model == "fallback-tools" { 3 } else { 2 };
+        let answer = if model == "fallback-tools" { 6 } else { 5 };
         session.wait_text(&format!("answer-{answer}"))?;
         session.wait_text(&format!("medium · {model} (high)"))?;
         capture_session_view(&mut session, &format!("alias-{model}-after"))?;
@@ -2235,9 +2235,11 @@ fn startup_fallback_updates_the_pinned_model_and_effort_during_work_and_after_re
         close_command_session(&mut resumed)?;
         let requests = server.requests()?;
         assert_eq!(requests.len(), answer + 2);
-        assert_eq!(requests[0].body["model"], "failed-primary");
-        assert_eq!(requests[0].body["reasoning"], json!({"effort":"low"}));
-        for request in &requests[1..] {
+        for request in &requests[..4] {
+            assert_eq!(request.body["model"], "failed-primary");
+            assert_eq!(request.body["reasoning"], json!({"effort":"low"}));
+        }
+        for request in &requests[4..] {
             assert_eq!(request.body["model"], model);
             assert_eq!(request.body["reasoning"], json!({"effort":"high"}));
         }
@@ -2465,6 +2467,131 @@ fn cancellation_distinguishes_draft_clear_exit_and_external_signals() -> io::Res
 }
 
 #[test]
+fn child_http_recovery_preserves_edits_and_continues_after_a_rejected_tool_call() -> io::Result<()>
+{
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::ChildRecovery)?;
+    let home = root.command_home("child-recovery", &server.endpoint, true, None)?;
+    fs::write(home.join("existing.txt"), "repeat\nrepeat\n")?;
+    let mut session = Terminal::spawn(&home, &["recover delegated work"], 110, 32, None)?;
+    session.wait_text("Retrying provider request")?;
+    capture_session_view(&mut session, "child-provider-retrying")?;
+    session.wait_text("Parent finished independently")?;
+    session.wait_text("Provider paused")?;
+    session.wait_text("HTTP status 503")?;
+    wait_state(&mut session, "blocked")?;
+    capture_session_view(&mut session, "child-provider-paused")?;
+    let child_row = session
+        .screen()
+        .lines()
+        .position(|line| line.contains("licenses-cli · Provider paused"))
+        .ok_or_else(|| io::Error::other("missing paused child header"))?
+        + 1;
+    session.send(format!("\x1b[<0;8;{child_row}M\x1b[<0;8;{child_row}m").as_bytes())?;
+    session.wait_text("Edited existing.txt · failed")?;
+    session.send(format!("\x1b[<0;8;{child_row}M\x1b[<0;8;{child_row}m").as_bytes())?;
+    session.until(|session| !session.screen().contains("Edited existing.txt · failed"))?;
+    assert!(!session.screen().contains("Agent stopped"));
+    assert_eq!(fs::read_to_string(home.join("recovery-effects"))?, "x");
+    assert_eq!(
+        fs::read_to_string(home.join("existing.txt"))?,
+        "repeat\nrepeat\n"
+    );
+    let failed_requests: Vec<_> = server
+        .requests()?
+        .into_iter()
+        .filter(|request| {
+            request.body["input"].as_array().is_some_and(|input| {
+                input.iter().any(|item| {
+                    item["call_id"] == "child-effect" && item["type"] == "function_call_output"
+                })
+            })
+        })
+        .collect();
+    assert_eq!(
+        failed_requests.len(),
+        4,
+        "initial request plus three automatic retries"
+    );
+    for request in &failed_requests[1..] {
+        assert_eq!(request.body, failed_requests[0].body);
+    }
+    server.events.cycle_release.store(true, Ordering::SeqCst);
+    session.key(b"r")?;
+    session.until(|_| {
+        fs::read_to_string(home.join("existing.txt")).is_ok_and(|text| text == "fixed\nrepeat\n")
+    })?;
+    session.wait_text("Work Done")?;
+    session.key(b"\t")?;
+    session.key(b"\x1b[C")?;
+    session.key(b"\x1b[B")?;
+    session.key(b"\x1b[C")?;
+    session.key(b"\t")?;
+    session.key(b"\t")?;
+    session.key(b"\x1b[C")?;
+    session.wait_text("Child recovered and corrected the edit")?;
+    session.until(|session| !session.screen().contains("Provider paused"))?;
+    capture_session_view(&mut session, "child-provider-recovered")?;
+    assert_eq!(fs::read_to_string(home.join("recovery-effects"))?, "x");
+    assert_eq!(
+        fs::read_to_string(home.join("existing.txt"))?,
+        "fixed\nrepeat\n"
+    );
+    assert!(!has_bytes(
+        &session.transcript,
+        b"provider-private-sentinel"
+    ));
+    session.key(b"\x1b")?;
+    close_command_session(&mut session)?;
+    server.finish()
+}
+
+#[test]
+fn parent_completion_preserves_the_selected_child_cancellation() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::ChildRecovery)?;
+    let home = root.command_home("child-cancellation", &server.endpoint, true, None)?;
+    fs::write(home.join("existing.txt"), "repeat\nrepeat\n")?;
+    let mut session = Terminal::spawn(&home, &["cancel delegated work"], 110, 32, None)?;
+    session.wait_text("Provider paused")?;
+    session.until(|_| server.events.cycle_started.load(Ordering::SeqCst))?;
+    session.key(b"\x1b[B")?;
+    session.until(|session| {
+        session
+            .screen()
+            .lines()
+            .any(|line| line.trim_start().starts_with("▎ Cancel"))
+    })?;
+    capture_session_view(&mut session, "child-cancel-selected")?;
+    let requests = server.requests()?.len();
+    server.events.cycle_release.store(true, Ordering::SeqCst);
+    session.wait_text("Parent finished independently")?;
+    assert!(
+        session
+            .screen()
+            .lines()
+            .any(|line| line.trim_start().starts_with("▎ Cancel")),
+        "{}",
+        session.screen()
+    );
+    capture_session_view(&mut session, "child-cancel-after-parent")?;
+    session.key(b"\r")?;
+    session.wait_text("Work Done")?;
+    assert_eq!(
+        server.requests()?.len(),
+        requests,
+        "Cancel must not resend the child's provider request"
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("existing.txt"))?,
+        "repeat\nrepeat\n"
+    );
+    assert_eq!(fs::read_to_string(home.join("recovery-effects"))?, "x");
+    close_command_session(&mut session)?;
+    server.finish()
+}
+
+#[test]
 fn provider_failures_retry_only_the_request_and_cancel_without_resetting_the_session()
 -> io::Result<()> {
     let root = Homes::new()?;
@@ -2540,6 +2667,8 @@ fn provider_failures_retry_only_the_request_and_cancel_without_resetting_the_ses
     }
     let mark = server.requests()?.len();
     session.send(b"retry-success\r")?;
+    session.wait_text("Retrying in 1s · 1/3")?;
+    capture_session_view(&mut session, "root-provider-retrying")?;
     wait_state(&mut session, "blocked")?;
     assert_eq!(
         server.requests()?.len(),
@@ -2966,6 +3095,7 @@ enum ProviderKind {
     Commands,
     Persistence,
     DelegatedSwitch,
+    ChildRecovery,
     Cancellation,
     Activities,
     Steering,
@@ -3173,9 +3303,9 @@ fn handle_request(
     let output = match kind {
         ProviderKind::StartupFallback => {
             if request.body["model"] == "failed-primary" {
-                return write_response(&mut stream, "503 Unavailable", "text/plain", "");
+                return stream.write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             }
-            if number == 2 && request.body["model"] == "fallback-tools" {
+            if number == 5 && request.body["model"] == "fallback-tools" {
                 vec![call(
                     "fallback-tools",
                     "await cocoa.wait(await cocoa.run({command:'touch fallback-tool-started; while [ ! -f release-fallback ]; do sleep 0.02; done',timeout_ms:8000}));",
@@ -3256,6 +3386,66 @@ fn handle_request(
                     }
                 }
                 vec![message(number, &format!("answer-{number}"))]
+            }
+        }
+        ProviderKind::ChildRecovery => {
+            let input = request.body["input"]
+                .as_array()
+                .ok_or_else(|| io::Error::other("missing inputs"))?;
+            let child = input
+                .iter()
+                .any(|item| item["role"] == "user" && item["content"] == "repair child edit");
+            let result = |identity: &str| {
+                input.iter().find(|item| {
+                    item["type"] == "function_call_output" && item["call_id"] == identity
+                })
+            };
+            if !child {
+                if result("spawn-recovery").is_some() {
+                    if input.iter().any(|item| {
+                        item["role"] == "user" && item["content"] == "cancel delegated work"
+                    }) {
+                        events.cycle_started.store(true, Ordering::SeqCst);
+                        let deadline = Instant::now() + Duration::from_secs(8);
+                        while !events.cycle_release.load(Ordering::SeqCst) {
+                            if Instant::now() >= deadline {
+                                return Err(io::Error::other("parent response was not released"));
+                            }
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    vec![message(number, "Parent finished independently")]
+                } else {
+                    vec![call(
+                        "spawn-recovery",
+                        "var worker = await cocoa.spawn({name:'licenses-cli',prompt:'repair child edit'}); print(await cocoa.wait(worker,{timeout_ms:30000}));",
+                    )]
+                }
+            } else if let Some(effect) = result("child-effect") {
+                let output = effect["output"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("missing child feedback"))?;
+                assert!(output.contains("match_ambiguous"), "{output}");
+                if !events.cycle_release.load(Ordering::SeqCst) {
+                    stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nx-request-id: req_child_recovery\r\nContent-Length: 25\r\nConnection: close\r\n\r\nprovider-private-sentinel")?;
+                    return stream.flush();
+                }
+                if let Some(corrected) = result("child-correct") {
+                    assert!(corrected["output"].as_str().is_some_and(
+                        |output| output.contains("42") && output.contains("completed")
+                    ));
+                    vec![message(number, "Child recovered and corrected the edit")]
+                } else {
+                    vec![call(
+                        "child-correct",
+                        "print(retained + 1); original = await cocoa.edit({file:original.file,edits:[{old_text:'repeat\\nrepeat',new_text:'fixed\\nrepeat'}]});",
+                    )]
+                }
+            } else {
+                vec![call(
+                    "child-effect",
+                    "var retained = 41; var original = await cocoa.read({path:'existing.txt'}); await cocoa.wait(await cocoa.run({command:'printf x >> recovery-effects'})); await cocoa.edit({file:original.file,edits:[{old_text:'repeat',new_text:'fixed'}]});",
+                )]
             }
         }
         ProviderKind::DelegatedSwitch => {
@@ -3596,7 +3786,7 @@ fn cancellation_output(
             vec![message(number, "Manual retry succeeded")]
         } else {
             stream.write_all(
-                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
             )?;
             stream.flush()?;
             return Ok(None);

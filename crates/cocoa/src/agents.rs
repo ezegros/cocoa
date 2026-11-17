@@ -17,7 +17,7 @@ use cocoa_core::{
     context::{ContextAssembler, ContextError},
     engine::{
         ActivityStatus, Engine, EngineSettings, EventPublisher, EventReceiver, Limits, Observation,
-        RunError, RunRequest,
+        ProviderFailure, RunError, RunRequest,
     },
     execution::{ExecutionError, WorkLimits, host_value_fits},
     store::{AgentId, InvocationId, Record, RecordId, RecordKind, StoreError, StoreLimits},
@@ -26,7 +26,7 @@ use futures_util::FutureExt;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tokio::{
-    sync::{Mutex, Semaphore, broadcast, watch},
+    sync::{Mutex, Semaphore, broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Duration, Instant},
 };
@@ -57,8 +57,19 @@ pub struct AgentUpdate {
 #[derive(Debug)]
 pub enum AgentUpdateKind {
     Started,
+    ProviderPaused { reason: String },
+    ProviderResumed,
     Observation(Observation),
     Finished(ActivityStatus),
+}
+
+/// One live child's pending provider request. Retrying preserves its runtime and
+/// completed effects. Cancelling stops only this child, not its parent or siblings.
+pub struct AgentProviderFailure {
+    pub agent: AgentId,
+    pub name: String,
+    pub failure: ProviderFailure,
+    pub cancellation: CancellationToken,
 }
 
 /// Bounded live observations with retained lifecycle reconciliation. Slow readers
@@ -68,9 +79,42 @@ pub struct AgentUpdates {
     shared: Weak<Shared>,
     receiver: broadcast::Receiver<Arc<AgentUpdate>>,
     lifecycle: BTreeMap<AgentId, ActivityStatus>,
+    paused: BTreeMap<AgentId, String>,
+    recovery: Option<mpsc::Receiver<AgentProviderFailure>>,
 }
 
 impl AgentUpdates {
+    /// Route child provider failures to this terminal observer. Without an
+    /// interactive recovery owner, failures remain terminal for headless callers.
+    /// Enable before admitting children; one observer owns decisions per manager.
+    ///
+    /// # Errors
+    /// Reject a closed manager or another observer already owning recovery.
+    pub async fn enable_recovery(&mut self) -> Result<(), CapabilityError> {
+        if self.recovery.is_some() {
+            return Ok(());
+        }
+        let shared = self.shared.upgrade().ok_or_else(unsettled)?;
+        let mut registry = shared.registry.lock().await;
+        registry.check()?;
+        if registry.recovery.is_some() {
+            return Err(tool(
+                "recovery_owned",
+                "another observer owns provider recovery",
+            ));
+        }
+        let (sender, receiver) = mpsc::channel(shared.limits.active);
+        registry.recovery = Some(sender);
+        self.recovery = Some(receiver);
+        Ok(())
+    }
+
+    /// Take the next pending child interruption without waiting. Decisions must
+    /// remain owned until retry, child cancellation or session shutdown.
+    pub fn try_failure(&mut self) -> Option<AgentProviderFailure> {
+        self.recovery.as_mut()?.try_recv().ok()
+    }
+
     /// Poll without waiting for work or a busy manager. Each drain reads at most
     /// 257 channel entries, including lag, and reconciles at most 32 agents. Lag is
     /// reported per child; it never implies a lifecycle transition. New readers
@@ -104,6 +148,26 @@ impl AgentUpdates {
             }
         }
         for entry in registry.entries.values() {
+            if let Stage::ProviderPaused { reason } = &entry.stage {
+                if self.paused.get(&entry.id) != Some(reason)
+                    || updates.iter().any(|update| update.agent == entry.id)
+                {
+                    updates.push(shared.update(
+                        entry.id,
+                        &entry.name,
+                        AgentUpdateKind::ProviderPaused {
+                            reason: reason.clone(),
+                        },
+                    ));
+                    self.paused.insert(entry.id, reason.clone());
+                }
+            } else if self.paused.remove(&entry.id).is_some() {
+                updates.push(shared.update(
+                    entry.id,
+                    &entry.name,
+                    AgentUpdateKind::ProviderResumed,
+                ));
+            }
             if missed > 0 {
                 updates.push(shared.update(
                     entry.id,
@@ -493,6 +557,7 @@ impl AgentManager {
                     admissions: BTreeMap::new(),
                     next_agent: 2,
                     context: ContextRecords::default(),
+                    recovery: None,
                     closed: false,
                     faulted: false,
                 }),
@@ -612,6 +677,8 @@ impl AgentManager {
             shared: Arc::downgrade(&self.shared),
             receiver: self.shared.updates.subscribe(),
             lifecycle: BTreeMap::new(),
+            paused: BTreeMap::new(),
+            recovery: None,
         }
     }
 
@@ -780,6 +847,7 @@ struct Registry {
     admissions: BTreeMap<RecordId, (AgentId, Value)>,
     next_agent: i64,
     context: ContextRecords,
+    recovery: Option<mpsc::Sender<AgentProviderFailure>>,
     closed: bool,
     faulted: bool,
 }
@@ -885,7 +953,10 @@ impl Entry {
     }
 
     fn cancel(&mut self, reason: StopReason) {
-        if matches!(self.stage, Stage::Starting | Stage::Running) {
+        if matches!(
+            self.stage,
+            Stage::Starting | Stage::Running | Stage::ProviderPaused { .. }
+        ) {
             self.stage = Stage::Cancelling { reason };
             self.cancellation.cancel();
         }
@@ -895,6 +966,7 @@ impl Entry {
 enum Stage {
     Starting,
     Running,
+    ProviderPaused { reason: String },
     Cancelling { reason: StopReason },
     Finished { outcome: Value },
     SetupFailed { outcome: Value },
@@ -907,7 +979,7 @@ impl Stage {
     fn active(&self) -> bool {
         matches!(
             self,
-            Self::Starting | Self::Running | Self::Cancelling { .. }
+            Self::Starting | Self::Running | Self::ProviderPaused { .. } | Self::Cancelling { .. }
         )
     }
 
@@ -915,6 +987,7 @@ impl Stage {
         match self {
             Self::Starting => "starting",
             Self::Running => "running",
+            Self::ProviderPaused { .. } => "provider_paused",
             Self::Cancelling { .. } => "cancelling",
             Self::Finished { outcome } | Self::SetupFailed { outcome } => {
                 outcome["status"].as_str().unwrap_or("failed")
@@ -968,7 +1041,7 @@ impl CapabilityHost for ManagedCapabilities {
             },
             CapabilityDescription {
                 name: "cocoa.wait".into(),
-                description: format!("Call await cocoa.wait(handle, {{timeout_ms: 5000}}) or await cocoa.wait({{review: handle, tests: anotherHandle}}, {{timeout_ms: 5000}}). Pass agent or process handles directly, never IDs or names. The second argument is optional; default wait is 30000ms, capped by the caller's operation window. timeout_ms must be a u32, never null or undefined; zero polls. Single waits return one outcome; groups accept at most 32 members, share one deadline and preserve supplied alias keys. Completed agent outcomes are {{name,status:'completed',answer}}; unfinished agent outcomes are {{name,status:'pending',state}}, and settled failures/cancellation have status 'failed'/'cancelled'. Results remain retained; pending or interrupted waits do not cancel work. Print or save returned JSON, not handles. Process results: {process_wait}"),
+                description: format!("Call await cocoa.wait(handle, {{timeout_ms: 5000}}) or await cocoa.wait({{review: handle, tests: anotherHandle}}, {{timeout_ms: 5000}}). Pass agent or process handles directly, never IDs or names. The second argument is optional; default wait is 30000ms, capped by the caller's operation window. timeout_ms must be a u32, never null or undefined; zero polls. Single waits return one outcome; groups accept at most 32 members, share one deadline and preserve supplied alias keys. Completed agent outcomes are {{name,status:'completed',answer}}; unfinished agent outcomes are {{name,status:'pending',state}}, and settled failures/cancellation have status 'failed'/'cancelled'. A provider_paused state returns immediately and awaits the user's Retry/Cancel decision. Do other work or report the interruption instead of polling or spawning a replacement. Results remain retained; pending or interrupted waits do not cancel work. Print or save returned JSON, not handles. Process results: {process_wait}"),
                 parameters: json!({"type":"object","description":"An opaque AgentHandle returned by cocoa.spawn, or a named record of such handles. Handles are not JSON values. Optional second JavaScript argument: {timeout_ms?: u32}."}),
             },
             CapabilityDescription {
@@ -1374,15 +1447,29 @@ impl ManagedCapabilities {
         process_arguments["handles"] = Value::Object(processes);
         let mut agent_arguments = arguments;
         agent_arguments["handles"] = Value::Object(agents);
-        let (processes, agents) = tokio::try_join!(
-            self.inner.call(
-                "cocoa.wait",
-                process_arguments,
-                limits,
-                cancellation.child_token()
-            ),
-            self.wait_agents(agent_arguments, limits, cancellation.child_token()),
-        )?;
+        let process_wait = self.inner.call(
+            "cocoa.wait",
+            process_arguments.clone(),
+            limits,
+            cancellation.child_token(),
+        );
+        let agent_wait = self.wait_agents(agent_arguments, limits, cancellation.child_token());
+        tokio::pin!(process_wait, agent_wait);
+        let (processes, agents) = tokio::select! {
+            result = &mut process_wait => (result?, agent_wait.await?),
+            result = &mut agent_wait => {
+                let agents = result?;
+                let paused = agents.as_object().ok_or_else(unsettled)?
+                    .values().any(|agent| agent["state"] == "provider_paused");
+                let processes = if paused {
+                    process_arguments["timeout_ms"] = json!(0);
+                    self.inner.call("cocoa.wait", process_arguments, limits, cancellation.child_token()).await?
+                } else {
+                    process_wait.await?
+                };
+                (processes, agents)
+            }
+        };
         let mut result = agents.as_object().cloned().ok_or_else(unsettled)?;
         result.extend(processes.as_object().ok_or_else(unsettled)?.clone());
         fits(Value::Object(result), limits.output_bytes)
@@ -1425,7 +1512,7 @@ impl ManagedCapabilities {
             if cancellation.is_cancelled() {
                 return Err(CapabilityError::Cancelled);
             }
-            let (snapshot, pending) = {
+            let (snapshot, pending, paused) = {
                 let registry = self.manager.shared.registry.lock().await;
                 registry.check()?;
                 let mut snapshots = BTreeMap::new();
@@ -1439,17 +1526,19 @@ impl ManagedCapabilities {
                 }
                 let mut result = Map::new();
                 let mut pending = false;
+                let mut paused = false;
                 for (alias, reference) in &arguments.handles {
                     let value = snapshots
                         .get(reference)
                         .ok_or_else(|| tool("invalid_handle", "missing handle snapshot"))?;
                     pending |= value["status"] == "pending";
+                    paused |= value["state"] == "provider_paused";
                     result.insert(alias.clone(), value.clone());
                 }
-                (Value::Object(result), pending)
+                (Value::Object(result), pending, paused)
             };
             fits(snapshot.clone(), limits.output_bytes)?;
-            if !pending || Instant::now() >= deadline {
+            if !pending || paused || Instant::now() >= deadline {
                 return Ok(snapshot);
             }
             tokio::select! {
@@ -1630,14 +1719,72 @@ impl AgentManager {
             self.shared.changed.send_replace(());
             entry.prompt.clone()
         };
-        let result = engine
-            .run(
-                RunRequest {
-                    input: prompt.into(),
-                },
-                cancellation,
-            )
-            .await;
+        let recovery = self.shared.registry.lock().await.recovery.clone();
+        let request = RunRequest {
+            input: prompt.into(),
+        };
+        let result = if let Some(recovery) = recovery {
+            let (_steering, mut messages) = mpsc::channel(1);
+            let (failures, mut receiver) = mpsc::channel::<ProviderFailure>(1);
+            let invocation =
+                engine.run_with_recovery(request, cancellation.clone(), &mut messages, &failures);
+            tokio::pin!(invocation);
+            loop {
+                let failure = tokio::select! {
+                    biased;
+                    result = &mut invocation => break result,
+                    Some(failure) = receiver.recv() => failure,
+                };
+                {
+                    let mut registry = self.shared.registry.lock().await;
+                    let entry = registry.entries.get_mut(&id).ok_or_else(unsettled)?;
+                    if matches!(entry.stage, Stage::Running) {
+                        entry.stage = Stage::ProviderPaused {
+                            reason: failure.error.recovery_description(),
+                        };
+                        self.shared.changed.send_replace(());
+                    }
+                }
+                let (retry, decision) = oneshot::channel();
+                let notice = AgentProviderFailure {
+                    agent: id,
+                    name: name.into(),
+                    failure: ProviderFailure {
+                        error: failure.error,
+                        retry,
+                    },
+                    cancellation: cancellation.clone(),
+                };
+                tokio::select! {
+                    biased;
+                    result = &mut invocation => break result,
+                    sent = recovery.send(notice) => {
+                        if sent.is_err() { cancellation.cancel(); }
+                    }
+                }
+                tokio::select! {
+                    biased;
+                    result = &mut invocation => break result,
+                    decision = decision => {
+                        if decision.is_ok() && !cancellation.is_cancelled() {
+                            let mut registry = self.shared.registry.lock().await;
+                            let entry = registry.entries.get_mut(&id).ok_or_else(unsettled)?;
+                            if matches!(entry.stage, Stage::ProviderPaused { .. }) {
+                                entry.stage = Stage::Running;
+                                self.shared.changed.send_replace(());
+                            }
+                            if failure.retry.send(()).is_err() {
+                                cancellation.cancel();
+                            }
+                        } else {
+                            cancellation.cancel();
+                        }
+                    }
+                }
+            }
+        } else {
+            engine.run(request, cancellation).await
+        };
         let mut registry = self.shared.registry.lock().await;
         let uncertain = matches!(
             &result,

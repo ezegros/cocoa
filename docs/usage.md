@@ -57,6 +57,14 @@ Press Esc twice within one second to cancel a turn. An open picker consumes Esc 
 
 Type exactly `exit`, `:q` or `:x` to close. Cancellation does not undo file changes or guarantee that remote work and detached processes stopped. Inspect what completed before retrying.
 
+### Recover from provider interruptions
+
+Cocoa automatically retries HTTP 429, 500, 502, 503 and 504 responses up to three times, including requests through ChatGPT. It follows a valid `Retry-After` of at most five minutes; otherwise it waits roughly 1, 2 and 4 seconds with jitter. A longer server-requested delay stops automatic retries rather than retrying too soon. Authorization, explicit quota and invalid-request errors are not retried automatically. Neither are connection failures or interrupted response streams.
+
+If a request still cannot complete, interactive chat shows the affected agent and offers Retry or Cancel. Retry resends only its pending model request, preserving its JavaScript state and completed tool work. Cancel stops the named agent, not its siblings. A paused child remains active even after the parent finishes; its recovery choices stay available. Concurrent interruptions are presented one at a time. One-shot `cocoa exec` does not wait for manual recovery.
+
+A rejected tool call is feedback for the model to correct, not an agent failure. Provider retry and pause notices are separate from individual tool results. Ending or restarting Cocoa does not preserve a paused child's live runtime.
+
 ## Read and copy results
 
 Scroll with the mouse wheel or PageUp/PageDown. Click an activity header to expand tool details. Tab moves into activity navigation; arrows select or expand rows, Enter or Space toggles them, and Esc returns to the draft.

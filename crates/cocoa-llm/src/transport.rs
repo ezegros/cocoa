@@ -4,10 +4,11 @@
 //! retries. HTTPS is required except HTTP to literal loopback IPs, including local
 //! Ollama. Protocol adapters own request encoding, replay and stream completion.
 //! No remote error bodies, transport diagnostics or credentials enter errors.
-//! HTTP 429 and 5xx rejections with a valid `Retry-After` allow three retries,
-//! each delayed at most five minutes. Both delay-seconds and HTTP dates are
-//! accepted. Retry waits report progress and remain cancellable; transport
-//! failures and partial streams are never replayed.
+//! HTTP 429 and transient 500/502/503/504 rejections allow three retries.
+//! Bounded `Retry-After` seconds or HTTP dates override exponential backoff
+//! with jitter. Hints beyond five minutes prevent retries rather than being
+//! shortened. Retry waits report progress and remain cancellable; explicit
+//! quota failures, transport failures and partial streams are never replayed.
 //!
 //! Each provider admits at most eight concurrent requests without queuing.
 //! Requests are limited to 64 MiB encoded JSON. One 64 MiB incoming-body budget
@@ -458,27 +459,45 @@ impl Transport {
             if response.status().is_success() {
                 break (response, attempt);
             }
-            let rejected: Result<(), _> = Err(ModelError::Rejected {
-                message: format!("HTTP status {}", response.status().as_u16()),
-            });
-            attempt.finish(&rejected).await?;
-            if self.kind == ProviderKind::ChatGpt {
-                let error = subscription_error(response).await;
-                return Err(match error {
-                    ModelError::Transport { message } => ModelError::Rejected { message },
-                    error => error,
-                });
-            }
-            if retries >= REQUEST_RETRIES {
-                return Err(ModelError::Rejected {
-                    message: "HTTP retry limit reached".into(),
-                });
-            }
-            let delay = retry_delay(&response).ok_or_else(|| ModelError::Rejected {
-                message: "HTTP status rejected".into(),
-            })?;
             let status = response.status().as_u16();
-            drop(response);
+            let delay = retry_delay(&response, retries);
+            let message = rejection_message(&response);
+            let rejected: Result<ModelResponse, _> = Err(ModelError::Rejected { message });
+            attempt.finish(&rejected).await?;
+            let Some(delay) = delay.filter(|_| retries < REQUEST_RETRIES) else {
+                return rejected;
+            };
+            let failure = rejection_body(response).await;
+            let retryable = failure.as_ref().is_some_and(|failure| {
+                ![
+                    "/response/error/code",
+                    "/error/code",
+                    "/error/type",
+                    "/code",
+                ]
+                .iter()
+                .any(|path| {
+                    matches!(
+                        failure.pointer(path).and_then(Value::as_str),
+                        Some(
+                            "insufficient_quota"
+                                | "quota_exceeded"
+                                | "usage_limit_reached"
+                                | "billing_hard_limit_reached"
+                                | "subscription_sharing_usage_limit_exceeded"
+                                | "subscription_sharing_user_not_eligible"
+                                | "invalid_grant"
+                                | "insufficient_scope"
+                                | "invalid_token"
+                                | "invalid_api_key"
+                                | "invalid_request_error"
+                        )
+                    )
+                })
+            });
+            if !retryable {
+                return rejected;
+            }
             retries += 1;
             let retry_at = tokio::time::Instant::now() + delay;
             if let Some(observations) = &request.observations {
@@ -1005,8 +1024,8 @@ fn transport(message: &str) -> ModelError {
     }
 }
 
-async fn subscription_error(mut response: reqwest::Response) -> ModelError {
-    let status = response.status().as_u16();
+fn rejection_message(response: &reqwest::Response) -> String {
+    let mut message = format!("HTTP status {}", response.status().as_u16());
     let request_id = response
         .headers()
         .get("x-request-id")
@@ -1017,21 +1036,22 @@ async fn subscription_error(mut response: reqwest::Response) -> ModelError {
                 && id
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
-        })
-        .map(str::to_owned);
+        });
+    if let Some(id) = request_id {
+        message.push_str(&format!("; request {id}"));
+    }
+    message
+}
+
+async fn rejection_body(mut response: reqwest::Response) -> Option<Value> {
     let mut bytes = Vec::new();
-    while let Ok(Some(chunk)) = response.chunk().await {
+    while let Some(chunk) = response.chunk().await.ok()? {
         if bytes.len().saturating_add(chunk.len()) > 65536 {
-            break;
+            return None;
         }
         bytes.extend_from_slice(&chunk);
     }
-    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    let mut error = subscription_failure(&value, Some(status));
-    if let (Some(id), ModelError::Transport { message }) = (request_id, &mut error) {
-        message.push_str(&format!("; request {id}"));
-    }
-    error
+    Some(serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
 pub(crate) fn subscription_failure(value: &Value, status: Option<u16>) -> ModelError {
@@ -1113,22 +1133,33 @@ impl WireBounds {
     }
 }
 
-fn retry_delay(response: &reqwest::Response) -> Option<Duration> {
-    if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS
-        && !response.status().is_server_error()
-    {
+fn retry_delay(response: &reqwest::Response, retries: u32) -> Option<Duration> {
+    if !matches!(response.status().as_u16(), 429 | 500 | 502 | 503 | 504) {
         return None;
     }
-    let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?.trim();
-    let delay = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        Duration::from_secs(value.parse().ok()?)
-    } else {
-        httpdate::parse_http_date(value)
-            .ok()?
-            .duration_since(SystemTime::now())
-            .unwrap_or(Duration::ZERO)
-    };
-    (delay <= RETRY_DELAY_MAX).then_some(delay)
+    if let Some(value) = response.headers().get(RETRY_AFTER)
+        && let Ok(value) = value.to_str()
+    {
+        let value = value.trim();
+        let delay = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+            // An overflowing number is excessive, not a malformed short hint.
+            Some(Duration::from_secs(value.parse().ok()?))
+        } else {
+            httpdate::parse_http_date(value).ok().map(|date| {
+                date.duration_since(SystemTime::now())
+                    .unwrap_or(Duration::ZERO)
+            })
+        };
+        if let Some(delay) = delay {
+            return (delay <= RETRY_DELAY_MAX).then_some(delay);
+        }
+    }
+    let jitter = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos()
+        % 251;
+    Some(Duration::from_secs(1 << retries.min(2)) + Duration::from_millis(u64::from(jitter)))
 }
 
 fn encoded_within(

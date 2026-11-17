@@ -200,6 +200,7 @@ pub struct Chat {
     message_steering: bool,
     phase: Phase,
     progress: Progress,
+    provider_attempt: u32,
     history: VecDeque<Message>,
     preview: String,
     preview_markdown: Markdown,
@@ -259,6 +260,7 @@ impl Chat {
             message_steering: true,
             phase: Phase::Idle,
             progress: Progress::Thinking,
+            provider_attempt: 0,
             history: VecDeque::new(),
             preview: String::new(),
             preview_markdown: Markdown::default(),
@@ -397,21 +399,26 @@ impl Chat {
     /// Whether Enter may submit or steer, including attaching a pending image path.
     #[must_use]
     pub fn can_submit(&self) -> bool {
-        self.phase == Phase::Idle
-            || (self.phase == Phase::Running
-                && self.message_steering
-                && !matches!(self.progress, Progress::Paused { .. }))
+        !matches!(self.progress, Progress::Paused { .. })
+            && (self.phase == Phase::Idle
+                || (self.phase == Phase::Running && self.message_steering))
     }
 
     /// Pause model submission and show Retry above Cancel. The reason must be a
     /// sanitized host-authored message, never a raw provider diagnostic.
+    /// Repeating the displayed reason preserves the selected recovery action.
     pub fn provider_paused(&mut self, reason: &str) {
+        let reason = display_label(reason, 1024);
+        if matches!(&self.progress, Progress::Paused { reason: current, .. } if current == &reason)
+        {
+            return;
+        }
         self.preview.clear();
         self.activity_focus = None;
         self.selection.invalidate();
         self.reset_gestures();
         self.progress = Progress::Paused {
-            reason: display_label(reason, 1024),
+            reason,
             selected: 0,
         };
     }
@@ -419,6 +426,7 @@ impl Chat {
     /// Remove the recovery choices before requesting another provider response.
     pub fn provider_resumed(&mut self) {
         self.progress = Progress::Thinking;
+        self.provider_attempt = 0;
         self.recovery_rows = [Rect::default(); 2];
     }
 
@@ -626,12 +634,19 @@ impl Chat {
             kind,
         };
         self.selection.invalidate();
+        let paused = if matches!(self.progress, Progress::Paused { .. }) {
+            Some(std::mem::replace(&mut self.progress, Progress::Thinking))
+        } else {
+            None
+        };
         match &event.kind {
             EventKind::SteeringApplied => self.preview.clear(),
             EventKind::ModelStarted { .. } => {
                 self.progress = Progress::Thinking;
+                self.provider_attempt = 0;
             }
             EventKind::ProviderRetryScheduled { status, retry_at } => {
+                self.provider_attempt += 1;
                 self.progress = Progress::Retrying {
                     status: *status,
                     retry_at: *retry_at,
@@ -639,10 +654,8 @@ impl Chat {
             }
             EventKind::ProviderRetryStarted => self.progress = Progress::Thinking,
             EventKind::ModelFinished { executing } => {
-                if *executing && !matches!(self.progress, Progress::Paused { .. }) {
-                    self.progress = Progress::RunningTools;
-                }
                 if *executing {
+                    self.progress = Progress::RunningTools;
                     self.preview.clear();
                 }
             }
@@ -660,8 +673,7 @@ impl Chat {
                 if matches!(
                     &event.kind,
                     EventKind::CapabilityStarted { .. } | EventKind::CapabilityInput { .. }
-                ) && !matches!(self.progress, Progress::Paused { .. })
-                {
+                ) {
                     self.progress = Progress::RunningTools;
                 }
                 self.observe_capability(
@@ -672,15 +684,16 @@ impl Chat {
                 );
             }
             EventKind::CellStarted { .. } => {
-                if !matches!(self.progress, Progress::Paused { .. }) {
-                    self.progress = Progress::RunningTools;
-                }
+                self.progress = Progress::RunningTools;
             }
             EventKind::AnswerCompleted { .. }
             | EventKind::ReasoningFinished { .. }
             | EventKind::ExecutionState { .. }
             | EventKind::CellFinished { .. }
             | EventKind::Printed { .. } => {}
+        }
+        if let Some(paused) = paused {
+            self.progress = paused;
         }
     }
 
@@ -730,7 +743,25 @@ impl Chat {
         let group = self.agents[agent].key;
         match &update.kind {
             AgentUpdateKind::Started => {}
+            AgentUpdateKind::ProviderPaused { reason } => {
+                let index = self.ensure_activity(group, "Agent");
+                if let MessageKind::Activity(activity) = &mut self.history[index].kind {
+                    activity.provider_notice =
+                        Some(format!("Provider paused · {}", display_label(reason, 256)));
+                }
+            }
+            AgentUpdateKind::ProviderResumed => {
+                let index = self.ensure_activity(group, "Agent");
+                if let MessageKind::Activity(activity) = &mut self.history[index].kind {
+                    activity.provider_notice = None;
+                    activity.provider_attempt = 0;
+                }
+            }
             AgentUpdateKind::Finished(status) => {
+                let index = self.ensure_activity(group, "Agent");
+                if let MessageKind::Activity(activity) = &mut self.history[index].kind {
+                    activity.provider_notice = None;
+                }
                 self.finish_activity(group, *status);
                 for message in &mut self.history {
                     if let MessageKind::Activity(activity) = &mut message.kind
@@ -754,6 +785,25 @@ impl Chat {
                     kind,
                 };
                 match &event.kind {
+                    EventKind::ModelStarted { .. } | EventKind::ProviderRetryStarted => {
+                        let index = self.ensure_activity(group, "Agent");
+                        if let MessageKind::Activity(activity) = &mut self.history[index].kind {
+                            activity.provider_notice = None;
+                            if matches!(event.kind, EventKind::ModelStarted { .. }) {
+                                activity.provider_attempt = 0;
+                            }
+                        }
+                    }
+                    EventKind::ProviderRetryScheduled { status, .. } => {
+                        let index = self.ensure_activity(group, "Agent");
+                        if let MessageKind::Activity(activity) = &mut self.history[index].kind {
+                            activity.provider_attempt += 1;
+                            activity.provider_notice = Some(format!(
+                                "Retrying provider request {}/3 · HTTP {status}",
+                                activity.provider_attempt,
+                            ));
+                        }
+                    }
                     EventKind::AnswerCompleted { text, .. } => {
                         let key = key(ActivityKind::AgentAnswer);
                         let index = self.ensure_activity(key, "Agent answer");
@@ -1315,7 +1365,7 @@ impl Chat {
                 let label = match self.progress {
                     Progress::Retrying { retry_at, .. } => {
                         let seconds = retry_seconds(retry_at, Instant::now());
-                        format!("Retrying in {seconds}s")
+                        format!("Retrying in {seconds}s · {}/3", self.provider_attempt)
                     }
                     Progress::Paused { .. } => String::from("Paused"),
                     Progress::Thinking | Progress::RunningTools | Progress::Streaming => {
@@ -1428,8 +1478,8 @@ impl Chat {
     /// Local slash commands run while idle or during a turn, even with steering
     /// disabled, but not while stopping or when the provider is paused.
     fn commands_available(&self) -> bool {
-        self.phase == Phase::Idle
-            || (self.phase == Phase::Running && !matches!(self.progress, Progress::Paused { .. }))
+        matches!(self.phase, Phase::Idle | Phase::Running)
+            && !matches!(self.progress, Progress::Paused { .. })
     }
 
     fn input_event(&mut self, event: Event, now: Instant) -> Action {
@@ -2443,6 +2493,8 @@ impl Chat {
                     title: display_label(title, 256),
                     summary: None,
                     output: None,
+                    provider_notice: None,
+                    provider_attempt: 0,
                     state: ActivityState::Running,
                     expanded: matches!(key.kind, ActivityKind::Work),
                     collapse_on_finish: matches!(key.kind, ActivityKind::Work),
@@ -2985,6 +3037,8 @@ struct Activity {
     title: String,
     summary: Option<ActivitySummary>,
     output: Option<ActivityOutputKind>,
+    provider_notice: Option<String>,
+    provider_attempt: u32,
     state: ActivityState,
     expanded: bool,
     collapse_on_finish: bool,
@@ -3054,10 +3108,26 @@ impl Activity {
         let mut title = match self.key.kind {
             ActivityKind::Work if working => decorative.to_owned(),
             ActivityKind::Work => "Work Done".to_owned(),
+            ActivityKind::Agent if self.provider_notice.is_some() => format!(
+                "{} · {}",
+                self.title,
+                self.provider_notice.as_deref().unwrap_or_default(),
+            ),
             ActivityKind::Agent => format!(
                 "{} Agent {}",
                 self.title,
-                if working { decorative } else { "Worked" }
+                if working {
+                    decorative
+                } else if matches!(
+                    self.state,
+                    ActivityState::Finished(
+                        ActivityStatus::Failed { .. } | ActivityStatus::TimedOut
+                    )
+                ) {
+                    "stopped"
+                } else {
+                    "Worked"
+                }
             ),
             _ => tool_progress_label(&self.title, self.state.is_running())
                 .unwrap_or_else(|| self.title.clone()),

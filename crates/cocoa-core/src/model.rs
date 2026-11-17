@@ -352,3 +352,51 @@ pub enum ModelError {
     #[error("model request cancelled")]
     Cancelled,
 }
+
+impl ModelError {
+    /// Describe a provider interruption for display without exposing arbitrary
+    /// provider diagnostics. Only the transport's validated HTTP status and
+    /// request identity are preserved from rejection messages.
+    #[must_use]
+    pub fn recovery_description(&self) -> String {
+        match self {
+            Self::Rejected { message } => {
+                let (status, request) = message
+                    .split_once("; request ")
+                    .map_or((message.as_str(), None), |(status, request)| {
+                        (status, Some(request))
+                    });
+                let valid_status = status
+                    .strip_prefix("HTTP status ")
+                    .filter(|status| {
+                        status.len() == 3 && status.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .and_then(|status| status.parse::<u16>().ok())
+                    .is_some_and(|status| (100..=599).contains(&status));
+                let valid_request = request.is_none_or(|request| {
+                    request.starts_with("req_")
+                        && request.len() <= 128
+                        && request
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+                });
+                if valid_status && valid_request {
+                    message.clone()
+                } else {
+                    "Provider rejected the request. Check account access, usage limits and model settings."
+                        .into()
+                }
+            }
+            Self::Transport { .. } => "Provider connection failed.".into(),
+            Self::Protocol { .. } => "Provider returned an invalid response.".into(),
+            Self::Stalled => "Provider response timed out.".into(),
+            Self::ContextLimit {
+                input_tokens,
+                input_limit,
+            } => format!(
+                "Input needs {input_tokens} tokens but the context budget allows {input_limit}. The request was not sent."
+            ),
+            Self::Cancelled => "Provider request cancelled.".into(),
+        }
+    }
+}
