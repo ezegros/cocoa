@@ -8,7 +8,40 @@ use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
 /// Provider profiles in discovery order, also bounding concurrent account discovery.
-pub const PROVIDERS: [ProviderKind; ProviderKind::ALL.len()] = ProviderKind::ALL;
+pub const PROVIDERS: [ProviderKind; ProviderKind::ALL.len()] = [
+    ProviderKind::ChatGpt,
+    ProviderKind::OpenAi,
+    ProviderKind::Anthropic,
+    ProviderKind::DeepSeek,
+    ProviderKind::OpenRouter,
+    ProviderKind::Ollama,
+    ProviderKind::HuggingFace,
+    ProviderKind::QwenTokenPlan,
+    ProviderKind::XAi,
+    ProviderKind::Groq,
+    ProviderKind::Nvidia,
+    ProviderKind::Together,
+    ProviderKind::Fireworks,
+    ProviderKind::MoonshotAi,
+    ProviderKind::KimiCode,
+    ProviderKind::Zai,
+    ProviderKind::Meta,
+    ProviderKind::VercelAiGateway,
+    ProviderKind::Cerebras,
+    ProviderKind::OpenCodeZen,
+    ProviderKind::OpenCodeGo,
+    ProviderKind::Baseten,
+    ProviderKind::MoonshotAiCn,
+    ProviderKind::ZaiCodingCn,
+    ProviderKind::QwenTokenPlanCn,
+    ProviderKind::QwenTokenPlanIndividual,
+    ProviderKind::QwenTokenPlanIndividualCn,
+    ProviderKind::Xiaomi,
+    ProviderKind::AntLing,
+    ProviderKind::XiaomiTokenPlanCn,
+    ProviderKind::XiaomiTokenPlanAms,
+    ProviderKind::XiaomiTokenPlanSgp,
+];
 
 /// One advertised or configured model and its available provider metadata.
 #[derive(Clone)]

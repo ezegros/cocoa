@@ -2492,6 +2492,7 @@ fn first_run_selects_a_concrete_model_without_creating_aliases() -> io::Result<(
         )?;
         let before = configuration(&session)?;
         session.wait_text("Choose a provider")?;
+        session.key(b"\x1b[B")?;
         session.key(b"\r")?;
         session.wait_text("API key")?;
         session.command("onboarding-private-sentinel")?;
