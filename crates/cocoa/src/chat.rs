@@ -2255,6 +2255,11 @@ impl Chat {
         frame.render_widget(Block::new().style(self.theme.style()), area);
         let selected = self.slash_selected.min(matches.len() - 1);
         let first = selected.saturating_sub(usize::from(height.saturating_sub(1)));
+        let command_width = matches
+            .iter()
+            .map(|command| Line::from(command.as_str()).width())
+            .max()
+            .unwrap_or_default();
         let lines: Vec<_> = matches
             .iter()
             .enumerate()
@@ -2289,7 +2294,11 @@ impl Chat {
                 };
                 Line::from(vec![
                     Span::styled(
-                        format!("{} {command:<9}", if index == selected { "›" } else { " " }),
+                        format!(
+                            "{} {command}{}",
+                            if index == selected { "›" } else { " " },
+                            " ".repeat(command_width - Line::from(command.as_str()).width() + 2),
+                        ),
                         if index == selected {
                             Style::new().fg(palette.accent)
                         } else {

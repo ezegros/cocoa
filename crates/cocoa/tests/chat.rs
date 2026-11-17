@@ -847,7 +847,8 @@ fn slash_completion_requires_another_enter_and_commands_stay_out_of_prompt_histo
     let mut chat = Chat::new(1024)?;
     type_text(&mut chat, "/");
     let view = render(&mut chat, 80, 24)?;
-    assert!(view.contains("Connect a provider"));
+    assert!(view.contains("/login     Connect a provider"));
+    assert!(view.contains("/sessions  Search saved conversations"));
     assert!(view.contains("Disconnect a provider"));
     assert!(view.contains("Select an alias or provider model"));
     assert!(view.contains("Edit alias model choices and priorities"));
