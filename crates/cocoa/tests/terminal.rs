@@ -377,7 +377,8 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     assert_eq!(server.requests()?.len(), 2);
 
     let mut resumed = Terminal::spawn(&home, &["resume", &identity], 110, 36, None)?;
-    resumed.wait_text(&format!("Session {identity}"))?;
+    resumed.wait_text("root-sentinel first conversation")?;
+    assert!(!resumed.contains("Session sess_"));
     resumed.wait_text("root-sentinel first conversation")?;
     resumed.wait_text("Work Done")?;
     assert!(!resumed.contains("Session resumed"));
@@ -452,13 +453,15 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     fs::write(&configuration_path, &original)?;
 
     let mut locked = Terminal::spawn(&home, &["resume", &identity], 110, 36, None)?;
-    locked.wait_text(&format!("Session {identity}"))?;
+    locked.wait_text("root-sentinel first conversation")?;
+    assert!(!locked.contains("Session sess_"));
     resumed.command(&format!("/resume {identity}"))?;
     resumed.wait_text("another attachment owns this session")?;
     assert!(resumed.contains("answer-6"));
     close_command_session(&mut locked)?;
     resumed.command(&format!("/resume {}", &identity[..13]))?;
-    resumed.wait_text(&format!("Session {identity}"))?;
+    resumed.wait_text("root-sentinel first conversation")?;
+    assert!(!resumed.contains("Session sess_"));
     assert!(!resumed.contains("Session resumed"));
     assert!(resumed.contains("root-sentinel first conversation"));
     assert!(!resumed.contains("other conversation"));
@@ -476,7 +479,8 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     assert!(!resumed.contains(&home.to_string_lossy()));
     capture_session_view(&mut resumed, "session-picker-narrow")?;
     resumed.key(b"\x1b")?;
-    resumed.wait_text(&format!("Session {identity}"))?;
+    resumed.wait_text("root-sentinel first conversation")?;
+    assert!(!resumed.contains("Session sess_"));
     assert_eq!(
         session_page(&home, None)?["sessions"]
             .as_array()
@@ -619,8 +623,8 @@ async fn resume_picker_last_and_relocation_never_create_a_conversation() -> io::
         36,
         None,
     )?;
-    scoped.wait_text(&local_id)?;
-    scoped.wait_text(&format!("Session {local_id}"))?;
+    scoped.wait_text("Ready")?;
+    assert!(!scoped.contains("Session sess_"));
     close_command_session(&mut scoped)?;
     let moved = home.join("moved-project");
     fs::rename(&old_directory, &moved)?;
@@ -651,7 +655,7 @@ async fn resume_picker_last_and_relocation_never_create_a_conversation() -> io::
         None,
     )?;
     relocated.wait_text("Session relocated to")?;
-    relocated.wait_text(&other_id)?;
+    assert!(!relocated.contains("Session sess_"));
     close_command_session(&mut relocated)?;
     assert_eq!(
         database

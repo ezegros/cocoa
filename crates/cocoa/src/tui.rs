@@ -222,7 +222,6 @@ pub(crate) async fn run(
             thinking_level = target.thinking_level;
             chat.restore_transcript(&target.records);
             show_selection(chat, &label, &target.model_label, thinking_level);
-            if let Some(attachment) = &target.attachment { chat.notice(&format!("Session {}", attachment.public_id())); }
             if target.relocated { chat.notice(&format!("Session relocated to {}", target.directory.display())); }
             if let Some(active) = target.session.as_ref() {
                 chat.set_input_bytes(active.input_bytes)?;
@@ -597,10 +596,6 @@ async fn session(
                             match cocoa_tools::skill_commands(&working_directory, std::env::home_dir().as_deref()) {
                                 Ok(skills) => chat.set_skills(skills),
                                 Err(error) => chat.notice(&format!("Cannot discover skill commands: {error}")),
-                            }
-                            if matches!(action, config::SessionAction::Resume(_))
-                                && let Some(attachment) = &target.attachment {
-                                chat.notice(&format!("Session {}", attachment.public_id()));
                             }
                             if target.relocated { chat.notice(&format!("Session relocated to {}", working_directory.display())); }
                             if let Some(active) = &target.session { commands.mcp = Some(active.mcp.clone()); chat.set_message_steering(active.message_steering); }
