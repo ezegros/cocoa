@@ -1,0 +1,29 @@
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+## {{ group }}
+{% for commit in commits -%}
+- {% if commit.breaking %}**BREAKING:** {% endif %}{% if commit.scope %}**{{ commit.scope }}:** {% endif %}{{ commit.message }} ({{ commit.id | truncate(length=7, end="") }})
+{% if commit.breaking_description and commit.breaking_description != commit.message %}
+  {{ commit.breaking_description }}
+{% endif -%}
+{% endfor %}
+{% endfor -%}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+protect_breaking_commits = true
+commit_parsers = [
+  { field = "breaking", pattern = "true", group = "Breaking changes" },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^(refactor|docs|test|build|ci|chore|style|revert)", skip = true },
+]
+# Workflow ranges define releases; intervening preview tags must not split stable notes.
+ignore_tags = ".*"
+sort_commits = "oldest"

@@ -181,6 +181,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: cocoa-*
@@ -198,6 +199,37 @@ jobs:
           subject-path: |
             dist/cocoa-*.tar.gz
             dist/install.sh
+      - name: Choose the release notes range
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          releases=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --limit 1000 \
+            --json tagName,isPrerelease,publishedAt)
+          if [ "$(printf '%s' "$releases" | jq 'length')" -ge 1000 ]; then
+            echo "::error::Release history reached the 1000-release limit; increase it before publishing."
+            exit 1
+          fi
+          candidates=$(printf '%s' "$releases" | jq -r --arg tag "$TAG" '
+            sort_by(.publishedAt) | reverse | .[] |
+            select(($tag | contains("-")) or ((.isPrerelease == false) and (.tagName | test("^v[0-9]+[.][0-9]+[.][0-9]+$")))) |
+            .tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+(-preview\\.[0-9]+)?$"))')
+          range=$GITHUB_SHA
+          while IFS= read -r previous; do
+            [ -n "$previous" ] || continue
+            git rev-parse --verify "refs/tags/$previous^{commit}" > /dev/null
+            if git merge-base --is-ancestor "refs/tags/$previous" "$GITHUB_SHA"; then
+              range="$previous..$GITHUB_SHA"
+              break
+            fi
+          done <<< "$candidates"
+          echo "range=$range" >> "$GITHUB_OUTPUT"
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4
+        with:
+          version: v2.12.0
+          args: ${{ steps.notes.outputs.range }} --output release-notes.md
       - name: Publish the release and create its tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -213,5 +245,5 @@ jobs:
             --draft \
             "${prerelease[@]}" \
             --title "$TAG" \
-            --generate-notes
+            --notes-file release-notes.md
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

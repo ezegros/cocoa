@@ -108,4 +108,4 @@ Mark a breaking change with `!` before the colon or a `BREAKING CHANGE:` footer.
 
 Use the same convention for pull request titles so squash commits preserve it. Before merging, check that the final commit subject describes the complete change, not an intermediate implementation step.
 
-The release workflow currently uses GitHub-generated release notes, which summarize merged pull requests rather than parse Conventional Commits. Keep pull request titles suitable for those notes. Automatic grouping or versioning by commit type requires separate tooling.
+The release workflow uses git-cliff to generate release descriptions from Conventional Commits. Notes group features, fixes, performance improvements and breaking changes. Internal maintenance commits are omitted unless they introduce a breaking change. Preview notes cover changes since the most recent published preview or stable release on the built commit's history. Stable notes cover all changes since the previous published stable release, including changes shipped in previews. The first release includes the full history. Version bumps remain manual.
