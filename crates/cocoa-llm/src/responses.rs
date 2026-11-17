@@ -471,6 +471,7 @@ pub(crate) struct OutputStream {
     added: BTreeMap<usize, Value>,
     done: BTreeMap<usize, Value>,
     arguments: BTreeMap<usize, ArgumentStream>,
+    content: BTreeMap<usize, ContentStream>,
     summaries: BTreeSet<usize>,
     response_id: Option<String>,
     text_bytes: usize,
@@ -482,6 +483,11 @@ struct ArgumentStream {
     finalized: bool,
 }
 
+struct ContentStream {
+    item_id: String,
+    item_type: &'static str,
+}
+
 impl OutputStream {
     pub(crate) fn accept_event(
         &mut self,
@@ -491,7 +497,7 @@ impl OutputStream {
         output_bytes: usize,
         observations: Option<&ObservationSink>,
     ) -> Result<Option<ModelResponse>, ModelError> {
-        let value: Value =
+        let mut value: Value =
             serde_json::from_str(&event.data).map_err(|_| protocol("invalid event JSON"))?;
         let kind = text(&value, "type")?;
         if event.event != "message" && event.event != kind {
@@ -538,11 +544,32 @@ impl OutputStream {
                     observations.assistant_text(fragment);
                 }
             }
-            "response.completed" => {
-                self.validate(&value["response"])?;
-                let result = profile.completed(&value["response"], execution, output_bytes)?;
+            "response.completed" | "response.done"
+                if kind == "response.completed" || profile.kind == ProviderKind::OpenRouter =>
+            {
+                let response = value
+                    .get_mut("response")
+                    .filter(|response| response.is_object())
+                    .ok_or_else(|| protocol("invalid completed response"))?;
+                // Completion can omit the output already delivered in
+                // output_item.done events. Never recover unfinished items.
+                if response.get("output").is_none_or(|output| {
+                    output.is_null() || output.as_array().is_some_and(Vec::is_empty)
+                }) && !self.done.is_empty()
+                {
+                    let mut output = Vec::with_capacity(self.done.len());
+                    for (&index, item) in &self.done {
+                        if index != output.len() {
+                            return Err(protocol("missing streamed output item"));
+                        }
+                        output.push(item.clone());
+                    }
+                    response["output"] = Value::Array(output);
+                }
+                self.validate(response)?;
+                let result = profile.completed(response, execution, output_bytes)?;
                 if let Some(observations) = observations
-                    && let Some(items) = value["response"]["output"].as_array()
+                    && let Some(items) = response["output"].as_array()
                 {
                     for (index, item) in items.iter().enumerate() {
                         if item["type"] == "reasoning" && !self.done.contains_key(&index) {
@@ -595,6 +622,10 @@ impl OutputStream {
             kind,
             "response.output_item.added"
                 | "response.output_item.done"
+                | "response.content_part.added"
+                | "response.content_part.done"
+                | "response.output_text.delta"
+                | "response.output_text.done"
                 | "response.reasoning_summary_text.delta"
                 | "response.function_call_arguments.delta"
                 | "response.function_call_arguments.done"
@@ -607,6 +638,43 @@ impl OutputStream {
             .filter(|&value| value < OUTPUT_ITEMS)
             .ok_or_else(|| protocol("invalid output index"))?;
         match kind {
+            "response.content_part.added"
+            | "response.content_part.done"
+            | "response.output_text.delta"
+            | "response.output_text.done" => {
+                if self.done.contains_key(&index) {
+                    return Err(protocol("content after completed item"));
+                }
+                let item_id = identifier(event, "item_id")?;
+                let item_type = if matches!(
+                    kind,
+                    "response.content_part.added" | "response.content_part.done"
+                ) {
+                    match text(&event["part"], "type")? {
+                        "output_text" => "message",
+                        "reasoning_text" => "reasoning",
+                        _ => return Err(protocol("unsupported content part or refusal")),
+                    }
+                } else {
+                    "message"
+                };
+                if let Some(content) = self.content.get(&index) {
+                    if content.item_id != item_id || content.item_type != item_type {
+                        return Err(protocol("content identity mismatch"));
+                    }
+                } else {
+                    self.content.insert(
+                        index,
+                        ContentStream {
+                            item_id: item_id.into(),
+                            item_type,
+                        },
+                    );
+                }
+                if let Some(item) = self.added.get(&index) {
+                    self.check_item(index, item)?;
+                }
+            }
             "response.reasoning_summary_text.delta" => {
                 let item = self
                     .added
@@ -724,6 +792,11 @@ impl OutputStream {
     }
 
     fn check_item(&self, index: usize, item: &Value) -> Result<(), ModelError> {
+        if let Some(content) = self.content.get(&index)
+            && (item["type"] != content.item_type || content.item_id != identifier(item, "id")?)
+        {
+            return Err(protocol("content identity mismatch"));
+        }
         if let Some(added) = self.added.get(&index) {
             if (added.get("id").is_some() && added["id"] != item["id"])
                 || added["type"] != item["type"]
@@ -761,7 +834,12 @@ impl OutputStream {
         let output = response["output"]
             .as_array()
             .ok_or_else(|| protocol("missing output"))?;
-        for &index in self.added.keys().chain(self.done.keys()) {
+        for &index in self
+            .added
+            .keys()
+            .chain(self.done.keys())
+            .chain(self.content.keys())
+        {
             let item = output
                 .get(index)
                 .ok_or_else(|| protocol("missing streamed output item"))?;

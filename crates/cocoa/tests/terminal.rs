@@ -823,9 +823,38 @@ fn copy_command_writes_the_last_answer_to_the_terminal_clipboard() -> io::Result
 
 #[test]
 fn fast_stream_remains_complete_before_provider_settlement() -> io::Result<()> {
+    use process::CommandExt;
+
     let root = Homes::new()?;
     let server = Provider::start(ProviderKind::Streaming)?;
     let home = root.command_home("fast-stream", &server.endpoint, true, None)?;
+    fs::write(home.join("tracked.txt"), "old\n")?;
+    for arguments in [
+        vec!["init", "--initial-branch=feat/composer"],
+        vec!["add", "tracked.txt"],
+        vec![
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(&home)
+            .output_bounded()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(home.join("tracked.txt"), "new\nextra\n")?;
     let mut session = Terminal::spawn(&home, &["stream quickly"], 90, 30, None)?;
     session.wait_text("preview-ready")?;
     let screen = session.screen();
@@ -834,8 +863,27 @@ fn fast_stream_remains_complete_before_provider_settlement() -> io::Result<()> {
         assert!(screen.contains(&line), "missing {line:?}:\n{screen}");
     }
     assert!(!session.states()?.contains(&"done".to_owned()));
+    session.wait_text("tok/s")?;
+    session.wait_text("feat/composer +2 -1")?;
+    capture_session_view(&mut session, "composer-stats-streaming")?;
     server.events.cycle_release.store(true, Ordering::SeqCst);
     session.wait_text("settled-answer")?;
+    session.wait_text("88%")?;
+    let ready = session.screen();
+    let title = ready
+        .lines()
+        .find(|line| line.starts_with('╭'))
+        .ok_or_else(|| io::Error::other("missing composer"))?;
+    assert!(
+        title.contains("Ready · ") && title.contains("s "),
+        "{ready}"
+    );
+    assert!(title.contains("fixture-model high · 88%"), "{ready}");
+    assert!(!title.contains("tok/s") && !title.contains('$'), "{ready}");
+    capture_session_view(&mut session, "composer-stats-ready")?;
+    session.resize(52, 16)?;
+    session.wait_text("88%")?;
+    capture_session_view(&mut session, "composer-stats-narrow")?;
     session.command(":q")?;
     session.finish(0)?;
     server.finish()
@@ -1376,7 +1424,7 @@ fn model_commands_pick_catalogue_and_manual_models_without_saving() -> io::Resul
     session.key(b"\x1b[C\x1b[C\x1b[C")?;
     session.key(b"\r")?;
     session.until(|session| !session.screen().contains("Select model"))?;
-    session.wait_text("fixture-model (low)")?;
+    session.wait_text("fixture-model low")?;
     assert!(!session.screen().contains("Thinking"));
     session.command("/model")?;
     session.wait_text("Select model")?;
@@ -1800,7 +1848,7 @@ fn alias_editor_saves_priorities_and_preserves_list_order() -> io::Result<()> {
         ]})),
     )?;
     let mut session = Terminal::spawn(&home, &[], 96, 28, None)?;
-    session.wait_text("first (low)")?;
+    session.wait_text("first low")?;
     session.command("/aliases")?;
     session.wait_text("+ Add alias")?;
     let before = configuration(&session)?;
@@ -1854,9 +1902,9 @@ fn alias_editor_saves_priorities_and_preserves_list_order() -> io::Result<()> {
     assert_eq!(saved["aliases"]["medium"][1]["effort"], "high");
     session.key(b"\x1b")?;
     session.key(b"\x1b")?;
-    session.wait_text("second (high)")?;
+    session.wait_text("second high")?;
     session.key(b"\x14")?;
-    session.wait_text("first (low)")?;
+    session.wait_text("first low")?;
     assert!(server.requests()?.is_empty(), "editing started inference");
     close_command_session(&mut session)?;
     server.finish()
@@ -2112,7 +2160,7 @@ fn aliases_manage_model_choices_and_select_a_default() -> io::Result<()> {
     session.wait_text("+ Add alias")?;
     session.key(b"\x1b")?;
     session.command("/model night")?;
-    session.wait_text("night-model (high)")?;
+    session.wait_text("night-model high")?;
     session.command("run the saved alias")?;
     session.wait_text("answer-1")?;
     let requests = server.requests()?;
@@ -2123,7 +2171,7 @@ fn aliases_manage_model_choices_and_select_a_default() -> io::Result<()> {
     session.wait_text("fixed for this session")?;
     close_command_session(&mut session)?;
     let mut returning = Terminal::spawn(&home, &[], 60, 24, None)?;
-    returning.wait_text("night-model (high)")?;
+    returning.wait_text("night-model high")?;
     returning.command("/models")?;
     returning.wait_text("Models · Aliases")?;
     returning.wait_text("medium")?;
@@ -2159,19 +2207,19 @@ fn alias_choices_keep_distinct_efforts_when_cycling_and_resuming() -> io::Result
     ]});
     fs::write(&path, serde_json::to_vec(&settings)?)?;
     let mut session = Terminal::spawn(&home, &[], 90, 28, None)?;
-    session.wait_text("same-model (low)")?;
+    session.wait_text("same-model low")?;
     session.key(b"\x14")?;
-    session.wait_text("same-model (high)")?;
+    session.wait_text("same-model high")?;
     session.command("use high effort")?;
     session.wait_text("answer-1")?;
     close_command_session(&mut session)?;
     let mut resumed = Terminal::spawn(&home, &["resume", "--last"], 90, 28, None)?;
-    resumed.wait_text("same-model (high)")?;
+    resumed.wait_text("same-model high")?;
     resumed.command("continue at high effort")?;
     resumed.wait_text("answer-2")?;
     close_command_session(&mut resumed)?;
     let mut low = Terminal::spawn(&home, &[], 90, 28, None)?;
-    low.wait_text("same-model (low)")?;
+    low.wait_text("same-model low")?;
     low.command("use low effort")?;
     low.wait_text("answer-3")?;
     close_command_session(&mut low)?;
@@ -2201,16 +2249,16 @@ fn startup_fallback_updates_the_pinned_model_and_effort_during_work_and_after_re
             ]})),
         )?;
         let mut session = Terminal::spawn(&home, &[], 110, 30, None)?;
-        session.wait_text("unused-primary (medium)")?;
+        session.wait_text("unused-primary medium")?;
         session.command("/models")?;
         session.wait_text("←→ model")?;
         session.key(b"\x1b[C\r")?;
-        session.wait_text("medium · failed-primary (low)")?;
+        session.wait_text("medium · failed-primary low")?;
         capture_session_view(&mut session, &format!("alias-{model}-before"))?;
         session.command("check the pinned footer")?;
         if model == "fallback-tools" {
             session.until(|session| session.home.join("fallback-tool-started").exists())?;
-            session.wait_text("medium · fallback-tools (high)")?;
+            session.wait_text("medium · fallback-tools high")?;
             capture_session_view(&mut session, "alias-fallback-tools-working")?;
             assert!(!session.screen().contains("failed-primary"));
             assert!(!session.screen().contains("answer-6"));
@@ -2219,19 +2267,19 @@ fn startup_fallback_updates_the_pinned_model_and_effort_during_work_and_after_re
         }
         let answer = if model == "fallback-tools" { 6 } else { 5 };
         session.wait_text(&format!("answer-{answer}"))?;
-        session.wait_text(&format!("medium · {model} (high)"))?;
+        session.wait_text(&format!("medium · {model} high"))?;
         capture_session_view(&mut session, &format!("alias-{model}-after"))?;
         assert!(!session.screen().contains("failed-primary"));
         session.command("continue with the pinned choice")?;
         session.wait_text(&format!("answer-{}", answer + 1))?;
-        session.wait_text(&format!("medium · {model} (high)"))?;
+        session.wait_text(&format!("medium · {model} high"))?;
         close_command_session(&mut session)?;
         let mut resumed = Terminal::spawn(&home, &["resume", "--last"], 110, 30, None)?;
-        resumed.wait_text(&format!("medium · {model} (high)"))?;
+        resumed.wait_text(&format!("medium · {model} high"))?;
         capture_session_view(&mut resumed, &format!("alias-{model}-resumed"))?;
         resumed.command("continue after resume")?;
         resumed.wait_text(&format!("answer-{}", answer + 2))?;
-        resumed.wait_text(&format!("medium · {model} (high)"))?;
+        resumed.wait_text(&format!("medium · {model} high"))?;
         close_command_session(&mut resumed)?;
         let requests = server.requests()?;
         assert_eq!(requests.len(), answer + 2);
@@ -2739,7 +2787,7 @@ fn command_activities_follow_process_settlement_before_and_after_answers() -> io
     let server = Provider::start(ProviderKind::Activities)?;
     let home = root.command_home("activities", &server.endpoint, true, None)?;
     let mut session = Terminal::spawn(&home, &[], 100, 26, None)?;
-    session.wait_text("medium · fixture-model (high)")?;
+    session.wait_text("medium · fixture-model high")?;
     session.command("Check background commands")?;
     session.until(|_| server.events.cycle_started.load(Ordering::SeqCst))?;
     session.wait_text("Toasting ▾")?;
@@ -3322,15 +3370,14 @@ fn handle_request(
                 let line = format!("Stream line {index}: abcdefghijklmnopqrstuvwxyz012345\n");
                 let mut batch = String::new();
                 for character in line.chars() {
-                    let event =
-                        json!({"type":"response.output_text.delta","delta":character.to_string()});
+                    let event = json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":format!("message_{number}"),"delta":character.to_string()});
                     batch.push_str(&format!("data: {event}\n\n"));
                 }
                 stream.write_all(batch.as_bytes())?;
                 stream.flush()?;
                 thread::sleep(Duration::from_millis(20));
             }
-            let event = json!({"type":"response.output_text.delta","delta":"preview-ready\n"});
+            let event = json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":format!("message_{number}"),"delta":"preview-ready\n"});
             write!(stream, "data: {event}\n\n")?;
             stream.flush()?;
             let deadline = Instant::now() + Duration::from_secs(8);
@@ -3342,6 +3389,7 @@ fn handle_request(
             }
             let event = json!({"type":"response.completed","response":{
                 "id":format!("response_{number}"),"status":"completed",
+                "usage":{"input_tokens":1000,"output_tokens":100,"input_tokens_details":{"cached_tokens":880}},
                 "output":[message(number, "settled-answer")]
             }});
             write!(stream, "data: {event}\n\n")?;

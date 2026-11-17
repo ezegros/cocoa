@@ -93,6 +93,7 @@ const HIDDEN_WAIT_NAME: &str = "cocoa.wait";
 const HIDDEN_WAIT_TITLE: &str = "Wait commands";
 const HIDDEN_WAIT_OPERATIONS: usize = 256;
 const LOADER_TICK_DURATION: Duration = Duration::from_millis(120);
+const STREAM_RATE_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PodPress {
@@ -223,6 +224,14 @@ pub struct Chat {
     directory: String,
     alias: String,
     thinking: Option<String>,
+    branch: Option<String>,
+    changes: Option<(u64, u64)>,
+    cache_hit_rate: Option<f64>,
+    cost_usd: Option<f64>,
+    turn_elapsed: Option<Duration>,
+    stream_characters: Option<u64>,
+    stream_elapsed: Duration,
+    stream_tokens_per_second: Option<f64>,
     input_notice: String,
     activity_elapsed: Duration,
     escape_deadline: Option<Instant>,
@@ -280,6 +289,14 @@ impl Chat {
             directory: String::from("."),
             alias: String::new(),
             thinking: None,
+            branch: None,
+            changes: None,
+            cache_hit_rate: None,
+            cost_usd: None,
+            turn_elapsed: None,
+            stream_characters: None,
+            stream_elapsed: Duration::ZERO,
+            stream_tokens_per_second: None,
             input_notice: String::new(),
             activity_elapsed: Duration::ZERO,
             escape_deadline: None,
@@ -331,6 +348,23 @@ impl Chat {
         self.thinking = thinking
             .map(|thinking| display_label(thinking, 16))
             .filter(|thinking| !thinking.is_empty());
+    }
+
+    /// Set Git labels without doing I/O. Missing changes mean unknown, not clean.
+    /// Branch text is sanitized and bounded to 256 bytes.
+    pub fn set_workspace(&mut self, branch: Option<&str>, changes: Option<(u64, u64)>) {
+        self.branch = branch
+            .map(|branch| display_label(branch, 256))
+            .filter(|branch| !branch.is_empty());
+        self.changes = changes;
+    }
+
+    /// Show the latest cache hit percentage and approximate session API cost.
+    /// The host must omit subscription prices and unknown counters or rates.
+    /// Invalid percentages and nonfinite or negative costs are hidden.
+    pub fn set_usage(&mut self, cache_hit_rate: Option<f64>, cost_usd: Option<f64>) {
+        self.cache_hit_rate = cache_hit_rate.filter(|rate| (0.0..=100.0).contains(rate));
+        self.cost_usd = cost_usd.filter(|cost| cost.is_finite() && *cost >= 0.0);
     }
 
     /// Set discovered skill commands, retaining at most 64 entries.
@@ -489,6 +523,28 @@ impl Chat {
     /// Advance presentation using the input owner's monotonic clock.
     pub fn tick_at(&mut self, elapsed: Duration, now: Instant) -> bool {
         let mut expired = self.expire_gestures(now);
+        let mut timing_changed = false;
+        if matches!(self.phase, Phase::Running | Phase::Stopping) {
+            if let Some(turn_elapsed) = &mut self.turn_elapsed {
+                let previous = turn_elapsed.as_secs();
+                *turn_elapsed = turn_elapsed.saturating_add(elapsed);
+                timing_changed = turn_elapsed.as_secs() != previous;
+            }
+            if let Some(characters) = self.stream_characters {
+                let previous = self.stream_elapsed.as_secs() / STREAM_RATE_INTERVAL.as_secs();
+                self.stream_elapsed = self.stream_elapsed.saturating_add(elapsed);
+                if self.stream_elapsed.as_secs() / STREAM_RATE_INTERVAL.as_secs() != previous {
+                    self.stream_tokens_per_second =
+                        Some(characters as f64 / 4.0 / self.stream_elapsed.as_secs_f64());
+                    timing_changed = true;
+                }
+            }
+        }
+        timing_changed &= self.phase == Phase::Running
+            && matches!(
+                self.progress,
+                Progress::Thinking | Progress::Streaming | Progress::RunningTools
+            );
         if self.copy_deadline.is_some_and(|deadline| now >= deadline) {
             self.copy_deadline = None;
             expired = true;
@@ -520,7 +576,7 @@ impl Chat {
             || self.reduced_motion
             || (self.phase != Phase::Running && !ongoing)
         {
-            return files_changed || expired || retry_changed;
+            return files_changed || expired || retry_changed || timing_changed;
         }
         let previous = (self.loader(), self.activity_label());
         let cycle = ACTIVITY_LABEL_DURATION.as_nanos() * ACTIVITY_LABELS.len() as u128;
@@ -530,6 +586,7 @@ impl Chat {
             || retry_changed
             || files_changed
             || expired
+            || timing_changed
     }
 
     /// Handle keys, mouse-wheel scrolling and resize. Enter submits; Ctrl+Enter
@@ -644,6 +701,9 @@ impl Chat {
             EventKind::ModelStarted { .. } => {
                 self.progress = Progress::Thinking;
                 self.provider_attempt = 0;
+                self.stream_characters = None;
+                self.stream_elapsed = Duration::ZERO;
+                self.stream_tokens_per_second = None;
             }
             EventKind::ProviderRetryScheduled { status, retry_at } => {
                 self.provider_attempt += 1;
@@ -654,16 +714,31 @@ impl Chat {
             }
             EventKind::ProviderRetryStarted => self.progress = Progress::Thinking,
             EventKind::ModelFinished { executing } => {
+                self.stream_characters = None;
+                self.stream_tokens_per_second = None;
                 if *executing {
                     self.progress = Progress::RunningTools;
                     self.preview.clear();
                 }
             }
-            EventKind::ReasoningStarted { .. } | EventKind::ReasoningText { .. } => {
+            EventKind::ReasoningStarted { .. } => {
                 self.progress = Progress::Thinking;
+            }
+            EventKind::ReasoningText { text, .. } => {
+                self.progress = Progress::Thinking;
+                self.stream_characters = Some(
+                    self.stream_characters
+                        .unwrap_or(0)
+                        .saturating_add(text.chars().count() as u64),
+                );
             }
             EventKind::AssistantText { text, .. } => {
                 self.progress = Progress::Streaming;
+                self.stream_characters = Some(
+                    self.stream_characters
+                        .unwrap_or(0)
+                        .saturating_add(text.chars().count() as u64),
+                );
                 self.preview.extend(sanitized(text));
             }
             EventKind::CapabilityStarted { operation, .. }
@@ -1036,6 +1111,10 @@ impl Chat {
         self.previous_images.clear();
         self.saved_draft = None;
         self.up_armed = false;
+        self.turn_elapsed = None;
+        self.stream_characters = None;
+        self.stream_elapsed = Duration::ZERO;
+        self.stream_tokens_per_second = None;
         self.refresh_transcript(records);
     }
 
@@ -1372,7 +1451,18 @@ impl Chat {
                 frame.render_widget(Paragraph::new(text).style(style), row);
             }
         }
-        let title = match self.phase {
+        let mut title = match self.phase {
+            Phase::Idle
+                if self.alias.len()
+                    + self
+                        .thinking
+                        .as_ref()
+                        .map_or(0, |thinking| thinking.len() + 1)
+                    + 11
+                    <= usize::from(area.width) =>
+            {
+                Line::from(" Ready ")
+            }
             Phase::Idle => Line::default(),
             Phase::Running if paused_notice.is_some() => Line::from(" Paused "),
             Phase::Running => {
@@ -1403,31 +1493,73 @@ impl Chat {
             Phase::Stopping => Line::default(),
             Phase::Stopped => Line::from(" Stopped "),
         };
+        if let Some(elapsed) = self.turn_elapsed
+            && title.width() > 0
+            && (self.phase == Phase::Idle
+                || (self.phase == Phase::Running
+                    && matches!(
+                        self.progress,
+                        Progress::Thinking | Progress::Streaming | Progress::RunningTools
+                    )))
+        {
+            let timing = format!("· {}s ", elapsed.as_secs());
+            if (self.phase != Phase::Running || elapsed.as_secs() > 0)
+                && title.width() + timing.len() + self.alias.len() + 6 <= usize::from(area.width)
+            {
+                if self.phase == Phase::Running
+                    && matches!(self.progress, Progress::Streaming | Progress::Thinking)
+                    && let Some(tokens_per_second) = self.stream_tokens_per_second
+                {
+                    let speed = format!("· ~{tokens_per_second:.0} tok/s ");
+                    if title.width() + speed.len() + timing.len() + self.alias.len() + 6
+                        <= usize::from(area.width)
+                    {
+                        title.spans.push(Span::raw(speed));
+                    }
+                }
+                title.spans.push(Span::raw(timing));
+            }
+        }
         let title_width = title.width();
         block = block.title_top(title.style(Style::new().fg(status_color)));
         if !self.alias.is_empty() {
-            let mut label = format!(" {} ", self.alias);
-            // The effort suffix leaves the title first so a narrow terminal keeps the model.
+            let mut label = self.alias.clone();
             if let Some(thinking) = &self.thinking {
-                let suffixed = format!(" {} ({thinking}) ", self.alias);
-                if title_width + Line::from(suffixed.as_str()).width() + 2
+                let suffixed = format!("{label} {thinking}");
+                if title_width + Line::from(suffixed.as_str()).width() + 4
                     <= usize::from(area.width)
                 {
                     label = suffixed;
                 }
             }
-            let alias = Line::styled(label, Style::new().fg(palette.accent)).right_aligned();
+            for suffix in [
+                self.cache_hit_rate.map(|rate| format!(" · {rate:.0}%")),
+                self.cost_usd.map(|cost| format!(" · ~${cost:.2}")),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let suffixed = format!("{label}{suffix}");
+                if title_width + Line::from(suffixed.as_str()).width() + 4
+                    <= usize::from(area.width)
+                {
+                    label = suffixed;
+                }
+            }
+            let alias =
+                Line::styled(format!(" {label} "), Style::new().fg(palette.accent)).right_aligned();
             if title_width + alias.width() + 2 <= usize::from(area.width) {
                 block = block.title_top(alias);
             }
         }
-        let directory = directory_title(&self.directory, area.width.saturating_sub(4));
         let hint = if notice_inline && !bottom_notice.is_empty() {
             Line::from(format!(" {bottom_notice} "))
         } else {
             Line::default()
         };
-        if directory.width() + hint.width() + 4 <= usize::from(area.width) || hint.width() == 0 {
+        let workspace_width = usize::from(area.width).saturating_sub(hint.width() + 4);
+        let directory = self.workspace_title(workspace_width);
+        if directory.width() > 0 {
             block = block.title_bottom(
                 directory
                     .style(Style::new().fg(palette.muted))
@@ -1494,6 +1626,48 @@ impl Chat {
     fn commands_available(&self) -> bool {
         matches!(self.phase, Phase::Idle | Phase::Running)
             && !matches!(self.progress, Progress::Paused { .. })
+    }
+
+    fn workspace_title(&self, width: usize) -> Line<'static> {
+        if width < 3 {
+            return Line::default();
+        }
+        let palette = self.theme.palette();
+        let mut changes = Line::from(match self.changes {
+            Some((additions, deletions)) if additions > 0 || deletions > 0 => vec![
+                Span::styled(format!(" +{additions}"), Style::new().fg(palette.success)),
+                Span::styled(format!(" -{deletions}"), Style::new().fg(palette.error)),
+            ],
+            _ => Vec::new(),
+        });
+        let mut branch = self
+            .branch
+            .as_ref()
+            .map(|branch| fit_label(branch, width.saturating_sub(8).min(width / 2) as u16))
+            .filter(|branch| !branch.is_empty());
+        let branch_width = branch
+            .as_ref()
+            .map_or(0, |branch| Line::from(branch.as_str()).width() + 3);
+        if branch_width + changes.width() + 6 > width {
+            changes.spans.clear();
+        }
+        if branch_width + 5 > width {
+            branch = None;
+        }
+        let branch_width = branch
+            .as_ref()
+            .map_or(0, |branch| Line::from(branch.as_str()).width() + 3);
+        let directory_width = width.saturating_sub(branch_width + changes.width() + 2);
+        let mut spans = vec![Span::raw(format!(
+            " {}",
+            directory_title(&self.directory, directory_width)
+        ))];
+        if let Some(branch) = branch {
+            spans.push(Span::raw(format!(" · {branch}")));
+        }
+        spans.extend(changes.spans);
+        spans.push(Span::raw(" "));
+        Line::from(spans)
     }
 
     fn input_event(&mut self, event: Event, now: Instant) -> Action {
@@ -1998,6 +2172,10 @@ impl Chat {
             if !steering {
                 self.phase = Phase::Running;
                 self.progress = Progress::Thinking;
+                self.turn_elapsed = Some(Duration::ZERO);
+                self.stream_characters = None;
+                self.stream_elapsed = Duration::ZERO;
+                self.stream_tokens_per_second = None;
                 self.preview.clear();
                 self.invocation = None;
                 self.hidden_wait_operations
@@ -3475,20 +3653,39 @@ fn display_label(text: &str, limit: usize) -> String {
     label.replace('\n', " ")
 }
 
-fn directory_title(directory: &str, width: u16) -> Line<'static> {
-    if Line::from(directory).width() <= usize::from(width) {
-        return Line::from(format!(" {directory} "));
+fn directory_title(directory: &str, width: usize) -> String {
+    if Line::from(directory).width() <= width {
+        return directory.to_owned();
     }
-    for (index, _) in directory.match_indices('/') {
-        let tail = &directory[index..];
-        if Line::from(tail).width() < usize::from(width) {
-            return Line::from(format!(" …{tail} "));
+    let components: Vec<_> = directory
+        .trim_start_matches("~/")
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    for replaced in 1..components.len() {
+        let shortened = "../".repeat(replaced) + &components[replaced..].join("/");
+        if Line::from(shortened.as_str()).width() <= width {
+            return shortened;
         }
     }
-    Line::from(format!(
-        " {} ",
-        directory.rsplit('/').next().unwrap_or(directory)
-    ))
+    let basename = components.last().copied().unwrap_or(directory);
+    let shortened = format!("../{basename}");
+    if Line::from(shortened.as_str()).width() <= width {
+        return shortened;
+    }
+    let mut tail = String::new();
+    for character in basename.chars().rev() {
+        let candidate = format!("{character}{tail}");
+        if Line::from(candidate.as_str()).width() > width.saturating_sub(3) {
+            break;
+        }
+        tail = candidate;
+    }
+    if width >= 3 {
+        format!("../{tail}")
+    } else {
+        ".".repeat(width)
+    }
 }
 
 fn sanitized(text: &str) -> impl Iterator<Item = char> + '_ {

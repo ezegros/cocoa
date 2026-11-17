@@ -1130,7 +1130,7 @@ fn decorative_labels_ignore_model_and_tool_events_and_reset_for_each_turn()
         chat.input(key(KeyCode::Left, KeyModifiers::NONE));
         chat.tick(elapsed);
         let initial = render(&mut chat, 64, 20)?;
-        assert!(initial.contains(&format!("╭ {full}{label} ─")), "{initial}");
+        assert!(initial.contains(&format!("╭ {full}{label} ")), "{initial}");
         assert!(initial.contains(&format!("  {mini} {label}")), "{initial}");
         assert_eq!(initial.matches(full).count(), 1, "{initial}");
         assert_eq!(initial.matches(mini).count(), 1, "{initial}");
@@ -1178,7 +1178,7 @@ fn decorative_labels_ignore_model_and_tool_events_and_reset_for_each_turn()
         ] {
             observe_root_event(&mut chat, kind);
             let view = render(&mut chat, 64, 20)?;
-            assert!(view.contains(&format!("╭ {full}{label} ─")), "{view}");
+            assert!(view.contains(&format!("╭ {full}{label} ")), "{view}");
             assert!(view.contains(&format!("{mini} {label}")), "{view}");
             assert_eq!(view.matches(label).count(), 2, "{view}");
             assert_eq!(view.matches(full).count(), 1, "{view}");
@@ -1190,10 +1190,10 @@ fn decorative_labels_ignore_model_and_tool_events_and_reset_for_each_turn()
             invocation: InvocationId(99),
             kind: EventKind::ReasoningStarted { item: 0 },
         }));
-        assert!(render(&mut chat, 64, 20)?.contains(&format!("╭ {full}{label} ─")));
+        assert!(render(&mut chat, 64, 20)?.contains(&format!("╭ {full}{label} ")));
         chat.set_reduced_motion(true);
         let reduced = render(&mut chat, 64, 20)?;
-        assert!(reduced.contains("╭  [###] Toasting ─"), "{reduced}");
+        assert!(reduced.contains("╭  [###] Toasting "), "{reduced}");
         assert!(reduced.contains("[#] Toasting ▾"), "{reduced}");
         assert_eq!(reduced.matches("Toasting").count(), 2, "{reduced}");
         assert_eq!(reduced.matches(" [###] ").count(), 1, "{reduced}");
@@ -1205,8 +1205,19 @@ fn decorative_labels_ignore_model_and_tool_events_and_reset_for_each_turn()
             Duration::from_secs(86_400) + Duration::from_millis(600),
             Duration::MAX,
         ] {
-            assert!(!chat.tick(elapsed));
-            assert_eq!(render(&mut chat, 64, 20)?, reduced);
+            chat.tick(elapsed);
+            let advanced = render(&mut chat, 64, 20)?;
+            assert!(advanced.contains("╭  [###] Toasting "), "{advanced}");
+            assert_eq!(
+                advanced
+                    .lines()
+                    .filter(|line| !line.starts_with('╭'))
+                    .collect::<Vec<_>>(),
+                reduced
+                    .lines()
+                    .filter(|line| !line.starts_with('╭'))
+                    .collect::<Vec<_>>()
+            );
         }
         chat.complete("Final answer stays visible.");
         let completed = render(&mut chat, 64, 20)?;
@@ -4256,6 +4267,7 @@ fn pod_press_keeps_its_timing_and_fixed_group_slot_and_stops_on_completion()
         .find_map(|line| line.find("Toasting"))
         .ok_or("missing work header")?;
     assert_eq!(position, 6, "{first}");
+    let mut total_elapsed = Duration::ZERO;
     for (elapsed, full, mini, label, changed) in [
         (Duration::ZERO, " (o|o) ", "(o)", "Toasting", false),
         (
@@ -4486,6 +4498,9 @@ fn pod_press_keeps_its_timing_and_fixed_group_slot_and_stops_on_completion()
             true,
         ),
     ] {
+        let previous_seconds = total_elapsed.as_secs();
+        total_elapsed += elapsed;
+        let changed = changed || total_elapsed.as_secs() != previous_seconds;
         assert_eq!(
             chat.tick(elapsed),
             changed,
@@ -4513,14 +4528,14 @@ fn pod_press_keeps_its_timing_and_fixed_group_slot_and_stops_on_completion()
                 Some(position),
                 "{view}"
             );
-            assert!(view.contains(&format!("╭ {full}{label} ─")), "{view}");
+            assert!(view.contains(&format!("╭ {full}{label} ")), "{view}");
             assert!(view.contains("Reading file"), "{view}");
             let view = render(&mut model_only, width, 16)?;
             assert!(
                 view.lines().any(|line| line == format!("  {mini} {label}")),
                 "{view}"
             );
-            assert!(view.contains(&format!("╭ {full}{label} ─")), "{view}");
+            assert!(view.contains(&format!("╭ {full}{label} ")), "{view}");
             assert_eq!(view.matches(full).count(), 1, "{view}");
             assert_eq!(view.matches(mini).count(), 1, "{view}");
             assert_eq!(view.matches(label).count(), 2, "{view}");
@@ -4615,16 +4630,16 @@ fn direct_model_selection_shows_its_reasoning_effort_until_the_title_narrows()
     let mut chat = Chat::new(128)?;
     chat.set_context(".", "openai/gpt-5");
     chat.set_thinking(Some("high"));
-    for width in [16, 24, 40, 80] {
+    for width in [15, 16, 24, 40, 80] {
         let view = render(&mut chat, width, 16)?;
-        assert!(view.contains("gpt-5 (high)"), "{width}: {view}");
+        assert!(view.contains("gpt-5 high"), "{width}: {view}");
         assert!(!view.contains("openai/"), "{width}: {view}");
     }
-    for width in [9, 12, 15] {
+    for width in [9, 12] {
         let view = render(&mut chat, width, 16)?;
         assert!(view.contains("gpt-5"), "{width}: {view}");
         assert!(!view.contains("openai/"), "{width}: {view}");
-        assert!(!view.contains("(high)"), "{width}: {view}");
+        assert!(!view.contains(" high"), "{width}: {view}");
     }
     let narrow = render(&mut chat, 8, 16)?;
     assert!(!narrow.contains("gpt-5"), "{narrow}");
@@ -4633,6 +4648,138 @@ fn direct_model_selection_shows_its_reasoning_effort_until_the_title_narrows()
     assert!(view.contains("gpt-5"), "{view}");
     assert!(!view.contains("openai/"), "{view}");
     assert!(!view.contains('('), "{view}");
+    Ok(())
+}
+
+#[test]
+fn stream_rate_holds_between_samples_and_resets_for_each_model() -> Result<(), Box<dyn Error>> {
+    let mut chat = Chat::new(128)?;
+    chat.set_context("~/work/cocoa", "sonnet");
+    chat.set_reduced_motion(true);
+    chat.initial_prompt("check")?;
+    observe_root_event(
+        &mut chat,
+        EventKind::ReasoningText {
+            item: 0,
+            text: "x".repeat(400),
+            truncated: false,
+        },
+    );
+    chat.tick(Duration::from_millis(1999));
+    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    chat.tick(Duration::from_millis(1));
+    assert!(render(&mut chat, 100, 16)?.contains("~50 tok/s"));
+    observe_root_event(
+        &mut chat,
+        EventKind::AssistantText {
+            text: "y".repeat(800),
+            truncated: false,
+        },
+    );
+    assert!(render(&mut chat, 100, 16)?.contains("~50 tok/s"));
+    chat.tick(Duration::from_millis(1999));
+    assert!(render(&mut chat, 100, 16)?.contains("~50 tok/s"));
+    chat.tick(Duration::from_millis(1));
+    assert!(render(&mut chat, 100, 16)?.contains("~75 tok/s"));
+    observe_root_event(&mut chat, EventKind::ModelFinished { executing: true });
+    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    observe_root_event(&mut chat, EventKind::ModelStarted { round: 1 });
+    chat.tick(Duration::from_secs(5));
+    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    observe_root_event(
+        &mut chat,
+        EventKind::AssistantText {
+            text: "z".repeat(80),
+            truncated: false,
+        },
+    );
+    chat.tick(Duration::from_secs(3));
+    assert!(render(&mut chat, 100, 16)?.contains("~7 tok/s"));
+    observe_root_event(&mut chat, EventKind::ModelFinished { executing: false });
+    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    Ok(())
+}
+
+#[test]
+fn composer_stats_stay_on_the_border_and_keep_completed_time() -> Result<(), Box<dyn Error>> {
+    let mut chat = Chat::new(128)?;
+    chat.set_context("~/work/cocoa", "anthropic/sonnet");
+    chat.set_thinking(Some("high"));
+    chat.set_workspace(Some("feat/input"), Some((32, 10)));
+    chat.set_usage(Some(88.0), Some(0.84));
+    chat.set_reduced_motion(true);
+    chat.initial_prompt("check")?;
+    observe_root_event(
+        &mut chat,
+        EventKind::AssistantText {
+            text: "x".repeat(528),
+            truncated: false,
+        },
+    );
+    chat.tick(Duration::from_secs(2));
+    let view = render(&mut chat, 100, 16)?;
+    let top = view
+        .lines()
+        .find(|line| line.starts_with('╭'))
+        .ok_or("missing top border")?;
+    assert!(top.contains("~66 tok/s · 2s"), "{view}");
+    assert!(top.contains("sonnet high · 88% · ~$0.84"), "{view}");
+    let bottom = view.lines().last().ok_or("missing bottom border")?;
+    assert!(
+        bottom.ends_with(" ~/work/cocoa · feat/input +32 -10 ╯"),
+        "{view}"
+    );
+    assert!(!view.contains("context"), "{view}");
+    chat.complete("finished");
+    chat.tick(Duration::from_secs(30));
+    let ready = render(&mut chat, 100, 16)?;
+    assert!(ready.contains("Ready · 2s"), "{ready}");
+    assert!(!ready.contains("tok/s"), "{ready}");
+    let narrow_ready = render(&mut chat, 18, 16)?;
+    let top = narrow_ready
+        .lines()
+        .find(|line| line.starts_with('╭'))
+        .ok_or("missing top border")?;
+    assert!(top.contains("sonnet high"), "{narrow_ready}");
+    chat.set_usage(Some(88.0), None);
+    let subscription = render(&mut chat, 100, 16)?;
+    assert!(subscription.contains("sonnet high · 88%"), "{subscription}");
+    assert!(!subscription.contains('$'), "{subscription}");
+    chat.initial_prompt("next")?;
+    chat.tick(Duration::from_secs(1));
+    let next = render(&mut chat, 100, 16)?;
+    assert!(next.contains("· 1s"), "{next}");
+    assert!(!next.contains("tok/s"), "{next}");
+    Ok(())
+}
+
+#[test]
+fn workspace_shortens_left_components_and_restores_on_resize() -> Result<(), Box<dyn Error>> {
+    let mut chat = Chat::new(128)?;
+    let directory = "~/Development/projects/cocoa/crates/cocoa";
+    chat.set_context(directory, "sonnet");
+    chat.set_workspace(Some("feat/input"), Some((32, 10)));
+    for (width, expected) in [
+        (80, directory),
+        (60, "../projects/cocoa/crates/cocoa"),
+        (52, "../../cocoa/crates/cocoa"),
+        (80, directory),
+    ] {
+        let view = render(&mut chat, width, 16)?;
+        let bottom = view.lines().last().ok_or("missing bottom border")?;
+        assert!(bottom.contains(expected), "{width}: {view}");
+        assert!(bottom.contains("feat/input +32 -10"), "{width}: {view}");
+        assert!(!bottom.contains('…'), "{width}: {view}");
+    }
+    for width in 1..80 {
+        let view = render(&mut chat, width, 16)?;
+        assert!(
+            view.lines()
+                .last()
+                .is_some_and(|line| line.ends_with('╯') || width == 1),
+            "{width}: {view}"
+        );
+    }
     Ok(())
 }
 
@@ -4693,20 +4840,28 @@ fn pod_press_is_static_in_reduced_motion_and_quiet_during_recovery() -> Result<(
                 Duration::from_secs(86_400) + Duration::from_millis(600),
                 Duration::MAX,
             ] {
-                assert!(!chat.tick(elapsed));
-                assert_eq!(render(&mut chat, 40, 20)?, active);
+                chat.tick(elapsed);
+                let advanced = render(&mut chat, 40, 20)?;
+                assert!(advanced.contains("╭  [###] Toasting "), "{advanced}");
+                assert_eq!(
+                    advanced
+                        .lines()
+                        .filter(|line| !line.starts_with('╭'))
+                        .collect::<Vec<_>>(),
+                    active
+                        .lines()
+                        .filter(|line| !line.starts_with('╭'))
+                        .collect::<Vec<_>>()
+                );
             }
         }
-        assert!(!chat.tick(Duration::from_nanos(5_279_999_999)));
+        chat.tick(Duration::from_nanos(5_279_999_999));
         let waiting = render(&mut chat, 40, 20)?;
         assert!(
             waiting.contains(&format!("  {mini} Toasting ▾")),
             "{waiting}"
         );
-        assert!(
-            waiting.contains(&format!("╭ {full}Toasting ─")),
-            "{waiting}"
-        );
+        assert!(waiting.contains(&format!("╭ {full}Toasting ")), "{waiting}");
         observe_root_event(
             &mut chat,
             EventKind::ProviderRetryScheduled {
@@ -4732,10 +4887,7 @@ fn pod_press_is_static_in_reduced_motion_and_quiet_during_recovery() -> Result<(
             resumed.contains(&format!("  {mini} Toasting ▾")),
             "{resumed}"
         );
-        assert!(
-            resumed.contains(&format!("╭ {full}Toasting ─")),
-            "{resumed}"
-        );
+        assert!(resumed.contains(&format!("╭ {full}Toasting ")), "{resumed}");
         assert_eq!(chat.tick(Duration::from_nanos(1)), !reduced_motion);
         let label = if reduced_motion {
             "Toasting"
@@ -4745,14 +4897,11 @@ fn pod_press_is_static_in_reduced_motion_and_quiet_during_recovery() -> Result<(
         let full = if reduced_motion { " [###] " } else { " (o|o) " };
         let mini = if reduced_motion { "[#]" } else { "(o)" };
         let view = render(&mut chat, 40, 20)?;
-        assert!(view.contains(&format!("╭ {full}{label} ─")), "{view}");
+        assert!(view.contains(&format!("╭ {full}{label} ")), "{view}");
         assert!(view.contains(&format!("  {mini} {label} ▾")), "{view}");
         assert!(view.contains(&format!("Peer Agent {label} ▸")), "{view}");
         assert_eq!(view.matches(label).count(), 3, "{view}");
-        assert_eq!(
-            chat.tick(Duration::from_nanos(5_759_999_999)),
-            !reduced_motion
-        );
+        chat.tick(Duration::from_nanos(5_759_999_999));
         chat.provider_paused("Provider request failed.");
         let paused = render(&mut chat, 40, 20)?;
         assert!(paused.contains("╭ Paused ─"), "{paused}");
@@ -4781,7 +4930,7 @@ fn pod_press_is_static_in_reduced_motion_and_quiet_during_recovery() -> Result<(
             resumed.contains(&format!("  {mini} {label} ▾")),
             "{resumed}"
         );
-        assert!(resumed.contains(&format!("╭ {full}{label} ─")), "{resumed}");
+        assert!(resumed.contains(&format!("╭ {full}{label} ")), "{resumed}");
         assert_eq!(chat.tick(Duration::from_nanos(1)), !reduced_motion);
         let label = if reduced_motion {
             "Toasting"
@@ -4792,12 +4941,12 @@ fn pod_press_is_static_in_reduced_motion_and_quiet_during_recovery() -> Result<(
         let mini = if reduced_motion { "[#]" } else { "(o)" };
         let view = render(&mut chat, 40, 20)?;
         assert!(view.contains(&format!("  {mini} {label} ▾")), "{view}");
-        assert!(view.contains(&format!("╭ {full}{label} ─")), "{view}");
+        assert!(view.contains(&format!("╭ {full}{label} ")), "{view}");
         assert!(view.contains(&format!("Peer Agent {label} ▸")), "{view}");
-        assert_eq!(chat.tick(Duration::from_millis(57_600)), !reduced_motion);
+        chat.tick(Duration::from_millis(57_600));
         let view = render(&mut chat, 40, 20)?;
         assert!(view.contains(&format!("  {mini} Toasting ▾")), "{view}");
-        assert!(view.contains(&format!("╭ {full}Toasting ─")), "{view}");
+        assert!(view.contains(&format!("╭ {full}Toasting ")), "{view}");
         assert!(view.contains("Peer Agent Toasting ▸"), "{view}");
         chat.stopping();
         let stopping = render(&mut chat, 40, 20)?;

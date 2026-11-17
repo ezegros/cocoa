@@ -681,7 +681,7 @@ async fn resolve_api_key(
         .map_err(|_| ConnectError::Rejected)
 }
 
-async fn fetch(url: &str, key: Option<SecretString>, bytes_max: usize) -> Option<Value> {
+pub(crate) async fn fetch(url: &str, key: Option<SecretString>, bytes_max: usize) -> Option<Value> {
     fetch_checked(url, key, bytes_max).await.ok()
 }
 

@@ -24,6 +24,10 @@ pub enum RequestPurpose {
 pub struct RequestSettings {
     pub provider: String,
     pub model: String,
+    /// Whether transport used this provider's default endpoint. Missing is unknown;
+    /// the endpoint URL itself is never retained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_default: Option<bool>,
     pub thinking_level: Option<String>,
     pub output_tokens: Option<u32>,
     pub reasoning_summary: bool,

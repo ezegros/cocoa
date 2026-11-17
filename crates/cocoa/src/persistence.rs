@@ -57,6 +57,7 @@ mod storage;
 #[path = "persistence/writes.rs"]
 mod writes;
 
+pub use accounting::{UsageLedger, UsageRequest};
 pub use export::{ExportHistory, ExportLimits, ExportRequest, RunExport};
 pub use forks::RewindPoint;
 pub use history::{HistoryCursor, HistoryPage, HistoryReadLimits};

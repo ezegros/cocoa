@@ -347,11 +347,13 @@ async fn session(
     let mut animation_clock = Instant::now();
     let mut events = owned.as_ref().map(|active| active.events.subscribe());
     let mut recoveries = ProviderRecoveries::default();
+    let mut composer_status = ComposerStatus::default();
     loop {
         tokio::select! {
             biased;
             _ = interrupt.recv() => return Ok(()),
             now = tick.tick() => {
+                dirty |= composer_status.poll(chat, &working_directory, attachment).await;
                 if let Some(receiver) = &mut events
                     && observations(chat, receiver, &mut dirty).await
                     && let Some(active) = owned.as_ref()
@@ -723,6 +725,7 @@ async fn session(
                                     if terminal_error.is_some() {
                                         continue;
                                     }
+                                    dirty |= composer_status.poll(chat, &working_directory, attachment).await;
                                     dirty |= commands.poll(chat).await.changed;
                                     match keyboard(chat, commands, &mut dirty) {
                                         Ok(Action::Steer(input)) => {
@@ -1487,6 +1490,133 @@ fn draw(
     }
     commands.report_status()?;
     Ok(())
+}
+
+#[derive(Default)]
+struct ComposerStatus {
+    directory: PathBuf,
+    session: Option<cocoa::persistence::SessionPublicId>,
+    git_next: Option<Instant>,
+    git: Option<
+        tokio::task::JoinHandle<
+            Result<Option<cocoa::workspace::GitStatus>, cocoa::workspace::Error>,
+        >,
+    >,
+    usage_next: Option<Instant>,
+    usage: Option<
+        tokio::task::JoinHandle<(
+            cocoa::usage::PricingState,
+            Result<cocoa::usage::UsageSnapshot, PersistenceError>,
+        )>,
+    >,
+    pricing: Option<cocoa::usage::PricingState>,
+}
+
+impl ComposerStatus {
+    async fn poll(
+        &mut self,
+        chat: &mut Chat,
+        directory: &Path,
+        attachment: &Option<SessionAttachment>,
+    ) -> bool {
+        let mut changed = false;
+        if self.directory != directory {
+            if let Some(task) = self.git.take() {
+                task.abort();
+            }
+            self.directory = directory.to_owned();
+            self.git_next = None;
+            chat.set_workspace(None, None);
+            changed = true;
+        }
+        let session = attachment
+            .as_ref()
+            .map(|session| session.public_id().clone());
+        if self.session != session {
+            if let Some(task) = self.usage.take() {
+                task.abort();
+            }
+            self.session = session;
+            self.usage_next = None;
+            chat.set_usage(None, None);
+            changed = true;
+        }
+        if self
+            .git
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+            && let Some(task) = self.git.take()
+        {
+            match task.await {
+                Ok(Ok(Some(status))) => chat.set_workspace(Some(&status.branch), status.changes),
+                Ok(Ok(None)) => chat.set_workspace(None, None),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "composer Git status unavailable");
+                    chat.set_workspace(None, None);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "composer Git worker failed");
+                    chat.set_workspace(None, None);
+                }
+            }
+            changed = true;
+        }
+        if self
+            .usage
+            .as_ref()
+            .is_some_and(tokio::task::JoinHandle::is_finished)
+            && let Some(task) = self.usage.take()
+        {
+            match task.await {
+                Ok((pricing, result)) => {
+                    self.pricing = Some(pricing);
+                    match result {
+                        Ok(usage) => chat.set_usage(usage.cache_hit_percent, usage.approximate_usd),
+                        Err(error) => {
+                            tracing::debug!(%error, "composer usage unavailable");
+                            chat.set_usage(None, None);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "composer usage worker failed");
+                    chat.set_usage(None, None);
+                }
+            }
+            changed = true;
+        }
+        let now = Instant::now();
+        if self.git.is_none() && self.git_next.is_none_or(|next| now >= next) {
+            let directory = self.directory.clone();
+            self.git_next = Some(now + cocoa::workspace::GIT_REFRESH_INTERVAL);
+            self.git = Some(tokio::spawn(async move {
+                cocoa::workspace::read_git_status(&directory).await
+            }));
+        }
+        if self.usage.is_none()
+            && self.usage_next.is_none_or(|next| now >= next)
+            && let Some(attachment) = attachment.clone()
+        {
+            let mut pricing = self.pricing.take().unwrap_or_default();
+            self.usage_next = Some(now + Duration::from_secs(2));
+            self.usage = Some(tokio::spawn(async move {
+                let result = cocoa::usage::snapshot(&attachment, &mut pricing).await;
+                (pricing, result)
+            }));
+        }
+        changed
+    }
+}
+
+impl Drop for ComposerStatus {
+    fn drop(&mut self) {
+        if let Some(task) = &self.git {
+            task.abort();
+        }
+        if let Some(task) = &self.usage {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Default)]

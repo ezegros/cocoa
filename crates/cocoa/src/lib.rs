@@ -10,7 +10,9 @@ pub mod mcp;
 pub mod persistence;
 pub mod theme;
 pub mod update;
+pub mod usage;
 pub mod web_search;
+pub mod workspace;
 
 mod brand;
 mod context;

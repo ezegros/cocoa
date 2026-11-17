@@ -258,7 +258,9 @@ async fn oversized_streamed_text_is_rejected_before_a_terminal_event() -> Result
         } else if is_chat(kind) {
             chat(json!({"content":"éx"}), Value::Null)
         } else {
-            event(json!({"type":"response.output_text.delta","delta":"éx"}))
+            event(
+                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"answer","delta":"éx"}),
+            )
         };
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -614,7 +616,9 @@ fn failure_stream(kind: ProviderKind, failure: &str) -> String {
             "incomplete",
         )
     } else {
-        event(json!({"type":"response.output_text.delta","delta":"{}"}))
+        event(
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"answer","delta":"{}"}),
+        )
     }
 }
 

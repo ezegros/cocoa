@@ -407,6 +407,7 @@ impl Transport {
         let settings = RequestSettings {
             provider: self.kind.to_string(),
             model: self.model.clone(),
+            endpoint_default: Some(self.endpoint.as_str() == self.kind.endpoint_default()),
             thinking_level: self
                 .thinking_level
                 .map(|level| format!("{level:?}").to_lowercase()),
@@ -572,17 +573,14 @@ impl Transport {
                 if event.data != "[DONE]" {
                     let value: Value = serde_json::from_str(&event.data)
                         .map_err(|_| protocol("invalid event JSON"))?;
+                    let response_terminal = matches!(
+                        value["type"].as_str(),
+                        Some("response.completed" | "response.failed" | "response.incomplete")
+                    ) || (self.kind == ProviderKind::OpenRouter
+                        && value["type"] == "response.done");
                     terminal = terminal
-                        || matches!(
-                            value["type"].as_str(),
-                            Some(
-                                "response.completed"
-                                    | "response.failed"
-                                    | "response.incomplete"
-                                    | "error"
-                                    | "message_stop"
-                            )
-                        );
+                        || response_terminal
+                        || matches!(value["type"].as_str(), Some("error" | "message_stop"));
                     await_trailing_usage = (self.kind.is_chat_completions()
                         && matches!(
                             value["choices"][0]["finish_reason"].as_str(),
@@ -617,19 +615,8 @@ impl Transport {
                             Some((chat_completions::usage(&value["usage"])?, true))
                         }
                     } else {
-                        responses::usage(&value["response"]["usage"])?.map(|usage| {
-                            (
-                                usage,
-                                matches!(
-                                    value["type"].as_str(),
-                                    Some(
-                                        "response.completed"
-                                            | "response.failed"
-                                            | "response.incomplete"
-                                    )
-                                ),
-                            )
-                        })
+                        responses::usage(&value["response"]["usage"])?
+                            .map(|usage| (usage, response_terminal))
                     };
                     if let Some((usage, complete)) = reported {
                         attempt.report(usage, complete).await?;

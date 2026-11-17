@@ -131,6 +131,7 @@ async fn exec_uses_persistent_repl_tools_compaction_children_and_durable_history
     assert_eq!(requests.len(), 5);
     for (index, request) in requests.iter().enumerate() {
         assert_eq!(request["settings"]["provider"], "openai");
+        assert_eq!(request["settings"]["endpoint_default"], false);
         assert_eq!(
             request["settings"]["model"],
             if index == 3 {
@@ -1589,7 +1590,7 @@ async fn startup_fallback_orders_root_and_child_choices_and_pins_resume()
         None,
     )?;
     session.wait_text("startup fallback verified")?;
-    session.wait_text("medium · root-fallback (high)")?;
+    session.wait_text("medium · root-fallback high")?;
     session.command("Continue")?;
     finish_answer(&mut session, "same model verified")?;
     let snapshot = saved_snapshot(home.path()).await?;
@@ -1606,7 +1607,7 @@ async fn startup_fallback_orders_root_and_child_choices_and_pins_resume()
         30,
         None,
     )?;
-    resumed.wait_text("medium · root-fallback (high)")?;
+    resumed.wait_text("medium · root-fallback high")?;
     resumed.command("Continue after resume")?;
     finish_answer(&mut resumed, "resumed fallback verified")?;
     server
@@ -1640,7 +1641,7 @@ fn partial_output_ambiguous_failures_and_later_rejections_never_trigger_startup_
                 respond(
                     &mut stream,
                     "text/event-stream",
-                    "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial answer\"}\n\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"item_id\":\"answer\",\"delta\":\"partial answer\"}\n\n",
                 )?;
             } else if failure == "ambiguous" {
                 drop(stream);

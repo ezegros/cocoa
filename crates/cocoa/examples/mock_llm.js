@@ -99,7 +99,7 @@
         for (let index = 0; index < characters.length; index += 32) {
             const delta = characters.slice(index, index + 32).join('');
             if (chat) chat_event({content: delta}, null, true);
-            else event({type: 'response.output_text.delta', delta}, true);
+            else event({type: 'response.output_text.delta', output_index: 0, content_index: 0, item_id: 'msg_' + identity, delta}, true);
         }
         if (chat) {
             chat_event({}, 'stop');

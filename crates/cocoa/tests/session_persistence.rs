@@ -50,6 +50,7 @@ async fn run_export_preserves_durable_coverage_failures_and_sanitizes_private_pa
     let settings = RequestSettings {
         provider: "fixture".into(),
         model: "actual-root".into(),
+        endpoint_default: None,
         thinking_level: Some("high".into()),
         output_tokens: Some(137),
         reasoning_summary: false,

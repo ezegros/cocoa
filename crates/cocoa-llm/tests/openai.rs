@@ -2771,8 +2771,9 @@ async fn responses_cache_usage_rejects_invalid_counts() -> Result<(), Box<dyn Er
 #[tokio::test]
 async fn completed_text_and_usage_reach_the_engine() -> Result<(), Box<dyn Error>> {
     let server = MockServer::start().await;
-    let body = event(json!({"type":"response.output_text.delta","delta":"¡Hola 🦀!"}))
-        + &event(completed(json!([reasoning(), message("¡Hola 🦀!")])));
+    let body = event(
+        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_1","delta":"¡Hola 🦀!"}),
+    ) + &event(completed(json!([reasoning(), message("¡Hola 🦀!")])));
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
@@ -2923,7 +2924,7 @@ async fn inconsistent_streamed_calls_never_execute() -> Result<(), Box<dyn Error
     changed_identity["call_id"] = json!("different_call");
     let changed_id = event(completed(json!([changed_identity])));
     let prefix = call_events(0, "7 * 3 + 2");
-    let cases = [
+    let mut cases = vec![
         prefix.clone() + &changed_code,
         prefix.clone() + &changed_id,
         prefix.clone() + &event(completed(json!([message("lost call")]))),
@@ -2933,35 +2934,91 @@ async fn inconsistent_streamed_calls_never_execute() -> Result<(), Box<dyn Error
             )
             + &event(completed(json!([call(0, "7 * 3 + 2")]))),
         prefix.clone() + &prefix + &event(completed(json!([call(0, "7 * 3 + 2")]))),
-    ];
-    for (index, body) in cases.into_iter().enumerate() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
-            .mount(&server)
-            .await;
-        let mut engine = engine(
-            format!("{}/v1/responses", server.uri()),
-            ExecutionMode::Enabled,
-        )?;
-        let result = engine
-            .run(
-                RunRequest {
-                    input: "invalid stream".into(),
-                },
-                CancellationToken::new(),
+        prefix.clone(),
+        prefix.clone()
+            + &event(json!({"type":"response.incomplete","response":{"status":"incomplete"}})),
+        prefix.clone()
+            + &event(
+                json!({"type":"response.output_item.added","output_index":1,"item":message("unfinished")}),
             )
-            .await;
-        assert!(
-            matches!(
-                result,
-                Err(cocoa_core::engine::RunError::Model(
-                    cocoa_core::model::ModelError::Protocol { .. }
-                ))
-            ),
-            "case {index}: {result:?}"
-        );
-        engine.shutdown().await?;
+            + &event(completed(json!([]))),
+        call_events(1, "7 * 3 + 2") + &event(completed(json!([]))),
+        event(
+            json!({"type":"response.output_item.added","output_index":0,"item":call(0, "7 * 3 + 2")}),
+        ) + &event(completed(json!([]))),
+        prefix.clone() + &event(completed(json!({}))),
+    ];
+    let answer = message("answer");
+    let answer_done =
+        event(json!({"type":"response.output_item.done","output_index":1,"item":answer}));
+    let full_output = completed(json!([call(0, "7 * 3 + 2"), answer]));
+    for update in [
+        json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_1","delta":"answer"}),
+        json!({"type":"response.output_text.done","output_index":1,"content_index":0,"item_id":"msg_1","text":"answer"}),
+        json!({"type":"response.content_part.added","output_index":1,"content_index":0,"item_id":"msg_1","part":{"type":"output_text","text":""}}),
+        json!({"type":"response.content_part.done","output_index":1,"content_index":0,"item_id":"msg_1","part":answer["content"][0]}),
+    ] {
+        for output in [json!([]), json!([call(0, "7 * 3 + 2")])] {
+            cases.push(prefix.clone() + &event(update.clone()) + &event(completed(output)));
+        }
+        cases.push(prefix.clone() + &answer_done + &event(update) + &event(full_output.clone()));
+    }
+    cases.push(
+        prefix.clone()
+            + &event(json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"wrong","delta":"answer"}))
+            + &event(json!({"type":"response.output_text.done","output_index":1,"content_index":0,"item_id":"msg_1","text":"answer"}))
+            + &answer_done
+            + &event(full_output.clone()),
+    );
+    cases.push(
+        prefix.clone()
+            + &event(json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"wrong","delta":"answer"}))
+            + &answer_done
+            + &event(full_output),
+    );
+    cases.push(
+        event(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"fc_0","delta":"answer"}))
+            + &prefix
+            + &event(completed(json!([call(0, "7 * 3 + 2")]))),
+    );
+    for kind in ProviderKind::ALL {
+        if kind.is_chat_completions()
+            || matches!(kind, ProviderKind::Anthropic | ProviderKind::ChatGpt)
+        {
+            continue;
+        }
+        for (index, body) in cases.iter().enumerate() {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_raw(body.clone(), "text/event-stream"),
+                )
+                .mount(&server)
+                .await;
+            let mut engine = assemble_engine(
+                Arc::new(Provider::new(profile_options(kind, &server.uri()))?),
+                Box::new(NoExecution),
+                None,
+            )?;
+            let result = engine
+                .run(
+                    RunRequest {
+                        input: "invalid stream".into(),
+                    },
+                    CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(cocoa_core::engine::RunError::Model(
+                        cocoa_core::model::ModelError::Protocol { .. }
+                    ))
+                ),
+                "{kind} case {index}: {result:?}"
+            );
+            engine.shutdown().await?;
+        }
     }
     Ok(())
 }
@@ -2989,8 +3046,12 @@ async fn refusals_and_nonterminal_or_malformed_responses_are_not_answers()
             json!({"type":"response.failed","response":{"error":{"message":"remote-secret-body"}}}),
         ),
         event(json!({"type":"error","message":"remote-secret-body"})),
-        event(json!({"type":"response.output_text.delta","delta":"partial"})),
-        event(json!({"type":"response.output_text.done","text":"not terminal"})),
+        event(
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"partial"}),
+        ),
+        event(
+            json!({"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"msg_1","text":"not terminal"}),
+        ),
         "data: [DONE]\n\n".into(),
         "data: {broken\n\n".into(),
         event(completed(json!([]))),
@@ -3215,7 +3276,7 @@ async fn fragmented_sse_and_utf8_publish_provisional_text_and_complete()
 -> Result<(), Box<dyn Error>> {
     for newline in ["\n", "\r\n", "\r"] {
         let body = ("\u{feff}".to_string()
-            + &event(json!({"type":"response.output_text.delta","delta":"é🦀"}))
+            + &event(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"é🦀"}))
             + &event(completed(json!([message("é🦀")]))))
             .replace('\n', newline)
             .into_bytes();
@@ -4256,7 +4317,7 @@ async fn retries_are_bounded_with_fallback_and_exclude_excessive_hints_and_parti
     ] {
         let server = MockServer::start().await;
         let mut response = ResponseTemplate::new(status).set_body_raw(
-            event(json!({"type":"response.output_text.delta","delta":"partial"})),
+            event(json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"partial"})),
             "text/event-stream",
         );
         if let Some(value) = retry_after {
@@ -4762,6 +4823,163 @@ async fn chatgpt_renews_credentials_and_replays_namespaced_exec_without_api_fiel
 }
 
 #[tokio::test]
+async fn responses_profiles_replay_completed_items_when_terminal_output_is_empty_or_absent()
+-> Result<(), Box<dyn Error>> {
+    for kind in ProviderKind::ALL {
+        if kind.is_chat_completions() || kind == ProviderKind::Anthropic {
+            continue;
+        }
+        for (terminal_kind, output) in [
+            ("response.completed", Some(json!([]))),
+            ("response.completed", Some(Value::Null)),
+            ("response.completed", None),
+            ("response.done", None),
+        ] {
+            if terminal_kind == "response.done" && kind != ProviderKind::OpenRouter {
+                continue;
+            }
+            let local = MockServer::start().await;
+            let subscription = if kind == ProviderKind::ChatGpt {
+                Some(SubscriptionFixture::new().await?)
+            } else {
+                None
+            };
+            let server = subscription
+                .as_ref()
+                .map_or(&local, |fixture| &fixture.server);
+            let mut execution = call(1, "7 * 3 + 2");
+            if kind == ProviderKind::ChatGpt {
+                execution["namespace"] = json!("cocoa");
+            }
+            let mut thought = reasoning();
+            thought["content"] = json!([{"type":"reasoning_text","text":"calculate"}]);
+            let mut terminal = completed(json!([]));
+            terminal["type"] = json!(terminal_kind);
+            if let Some(output) = output {
+                terminal["response"]["output"] = output;
+            } else {
+                terminal["response"]
+                    .as_object_mut()
+                    .ok_or("missing fixture response")?
+                    .remove("output");
+            }
+            let mut added = execution.clone();
+            added["arguments"] = json!("");
+            let body = event(
+                json!({"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"rs_1","part":{"type":"reasoning_text","text":""}}),
+            ) + &event(
+                json!({"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"rs_1","part":thought["content"][0]}),
+            ) + &event(
+                json!({"type":"response.output_item.done","output_index":0,"item":thought}),
+            ) + &event(
+                json!({"type":"response.output_item.added","output_index":1,"item":added}),
+            ) + &event(
+                json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"fc_1","delta":execution["arguments"]}),
+            ) + &event(
+                json!({"type":"response.output_item.done","output_index":1,"item":execution}),
+            ) + &event(terminal.clone());
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+                .up_to_n_times(1)
+                .expect(1)
+                .mount(server)
+                .await;
+            let body = event(
+                json!({"type":"response.content_part.added","output_index":0,"content_index":0,"item_id":"msg_1","part":{"type":"output_text","text":""}}),
+            ) + &event(
+                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"2"}),
+            ) + &event(
+                json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"3"}),
+            ) + &event(
+                json!({"type":"response.output_text.done","output_index":0,"content_index":0,"item_id":"msg_1","text":"23"}),
+            ) + &event(
+                json!({"type":"response.content_part.done","output_index":0,"content_index":0,"item_id":"msg_1","part":message("23")["content"][0]}),
+            ) + &event(
+                json!({"type":"response.output_item.done","output_index":0,"item":message("23")}),
+            ) + &event(terminal);
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+                .mount(server)
+                .await;
+            let provider = if let Some(fixture) = &subscription {
+                fixture.provider(Arc::new(RenewingCredentials(AtomicUsize::new(0))))?
+            } else {
+                Provider::new(profile_options(kind, &server.uri()))?
+            };
+            let mut engine =
+                assemble_engine(Arc::new(provider), Box::new(ArithmeticExecutor), None)?;
+            let result = engine
+                .run(
+                    RunRequest {
+                        input: "calculate".into(),
+                    },
+                    CancellationToken::new(),
+                )
+                .await?;
+            assert_eq!(result.answer, "23", "{kind} {terminal_kind}");
+            let usage = result.usage.ok_or("missing usage")?;
+            assert_eq!((usage.input_tokens, usage.output_tokens), (34, 18));
+            let requests = server.received_requests().await.ok_or("missing requests")?;
+            assert_eq!(requests.len(), 2);
+            let replay: Value = requests[1].body_json()?;
+            assert_eq!(replay["input"][1], thought);
+            assert_eq!(replay["input"][2], execution);
+            assert_eq!(replay["input"][3]["call_id"], "call_1");
+            engine.shutdown().await?;
+            if let Some(fixture) = subscription {
+                fixture.shutdown().await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn openrouter_done_retains_final_usage_when_output_is_rejected() -> Result<(), Box<dyn Error>>
+{
+    let server = MockServer::start().await;
+    let mut terminal = completed(json!([]));
+    terminal["type"] = json!("response.done");
+    let mut invalid = call(0, "7 * 3 + 2");
+    invalid["name"] = json!("foreign");
+    terminal["response"]["output"] = json!([invalid]);
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(event(terminal), "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let evidence = Arc::new(RetryEvidence::default());
+    let model = AccountingProbe {
+        inner: Provider::new(profile_options(ProviderKind::OpenRouter, &server.uri()))?,
+        evidence: evidence.clone(),
+    };
+    let mut engine = assemble_engine(Arc::new(model), Box::new(NoExecution), None)?;
+    let result = engine
+        .run(
+            RunRequest {
+                input: "test".into(),
+            },
+            CancellationToken::new(),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(RunError::Model(ModelError::Protocol { .. }))
+    ));
+    engine.shutdown().await?;
+    let updates = evidence.updates.lock().map_err(|_| "poisoned evidence")?;
+    let final_update = updates.last().ok_or("missing request outcome")?;
+    assert_eq!(
+        final_update.outcome,
+        Some(cocoa_core::accounting::RequestOutcome::Protocol)
+    );
+    assert!(final_update.usage_complete);
+    let usage = final_update.usage.as_ref().ok_or("missing final usage")?;
+    assert_eq!((usage.input_tokens, usage.output_tokens), (17, 9));
+    Ok(())
+}
+
+#[tokio::test]
 async fn chatgpt_compacts_and_continues_with_namespaced_execution() -> Result<(), Box<dyn Error>> {
     use cocoa_core::compaction::{CheckpointLimits, CompactionPolicy};
 
@@ -5083,12 +5301,46 @@ async fn chatgpt_requires_completed_and_rejects_foreign_namespace_and_quota_afte
 -> Result<(), Box<dyn Error>> {
     let mut foreign_call = call(1, "7 * 3 + 2");
     foreign_call["namespace"] = json!("foreign");
+    let mut execution = call(0, "7 * 3 + 2");
+    execution["namespace"] = json!("cocoa");
+    let done = event(json!({"type":"response.output_item.done","output_index":0,"item":execution}));
+    let terminal = event(completed(json!([])));
+    let mut changed_execution = execution.clone();
+    changed_execution["arguments"] = json!("{\"code\":\"7 * 3 + 9\"}");
     for body in [
-        event(json!({"type":"response.output_text.delta","delta":"partial"})),
+        event(
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"partial"}),
+        ),
         event(json!({"type":"response.incomplete","response":{"status":"incomplete"}})),
         event(
             json!({"type":"response.failed","response":{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"secret-remote-body"}}}),
         ),
+        done.clone(),
+        done.clone()
+            + &event(json!({"type":"response.incomplete","response":{"status":"incomplete"}})),
+        done.clone() + &event(json!({"type":"response.completed","response":false})),
+        done.clone() + &event(completed(json!([changed_execution]))),
+        done.clone()
+            + &event(
+                json!({"type":"response.output_text.delta","output_index":1,"content_index":0,"item_id":"msg_1","delta":"unfinished"}),
+            )
+            + &terminal,
+        done.clone()
+            + &event(
+                json!({"type":"response.content_part.added","output_index":1,"content_index":0,"item_id":"msg_1","part":{"type":"output_text","text":""}}),
+            )
+            + &terminal,
+        done.clone()
+            + &event(
+                json!({"type":"response.output_item.added","output_index":1,"item":message("unfinished")}),
+            )
+            + &terminal,
+        event(json!({"type":"response.output_item.added","output_index":0,"item":execution}))
+            + &terminal,
+        event(json!({"type":"response.output_item.done","output_index":1,"item":execution}))
+            + &terminal,
+        event(json!({"type":"response.output_item.done","output_index":0,"item":foreign_call}))
+            + &terminal,
         event(completed(json!([foreign_call]))),
     ] {
         let fixture = SubscriptionFixture::new().await?;
