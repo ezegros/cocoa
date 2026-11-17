@@ -111,6 +111,7 @@ enum StartupDisposition {
 }
 
 pub(crate) async fn run(
+    directory: PathBuf,
     prompt: Option<String>,
     selection: config::Selection,
     open_menu: Option<&str>,
@@ -144,7 +145,7 @@ pub(crate) async fn run(
         }
     };
     let result = async {
-        let mut directory = std::env::current_dir()?.canonicalize()?;
+        let mut directory = directory.canonicalize()?;
         let mut restored = None;
         if let Some(resume) = &resume {
             let database = SessionDatabase::open_existing(&session_data::database_path(data_directory.as_deref())?).await.map_err(SessionDataError::Persistence)?;

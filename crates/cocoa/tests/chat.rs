@@ -4787,6 +4787,47 @@ fn workspace_shortens_left_components_and_restores_on_resize() -> Result<(), Box
 }
 
 #[test]
+fn managed_worktrees_display_the_name_instead_of_the_storage_path() -> Result<(), Box<dyn Error>> {
+    let mut chat = Chat::new(128)?;
+    chat.set_workspace(Some("test-1"), Some((3, 1)));
+    let absolute = std::env::home_dir()
+        .ok_or("missing home directory")?
+        .join(".config/cocoa/worktrees/cocoa-0123456789/test-1/src")
+        .display()
+        .to_string();
+    for (directory, expected) in [
+        (
+            "~/.config/cocoa/worktrees/cocoa-0123456789/test-1",
+            "test-1",
+        ),
+        (absolute.as_str(), "test-1/src"),
+        ("~/.config/cocoa/worktrees", "~/.config/cocoa/worktrees"),
+        ("~/projects/worktrees/test-1", "~/projects/worktrees/test-1"),
+    ] {
+        chat.set_context(directory, "sonnet");
+        for width in [60, 80, 100] {
+            let view = render(&mut chat, width, 16)?;
+            let bottom = view.lines().last().ok_or("missing bottom border")?;
+            assert!(
+                bottom.contains(&format!(" {expected} · test-1 +3 -1 ")),
+                "{view}"
+            );
+            assert!(!bottom.contains("cocoa-0123456789"), "{view}");
+        }
+    }
+    let unrelated = "/tmp/.config/cocoa/worktrees/repository/test-1";
+    chat.set_context(unrelated, "sonnet");
+    let view = render(&mut chat, 120, 16)?;
+    assert!(
+        view.lines()
+            .last()
+            .is_some_and(|line| line.contains(unrelated)),
+        "{view}"
+    );
+    Ok(())
+}
+
+#[test]
 fn pod_press_is_static_in_reduced_motion_and_quiet_during_recovery() -> Result<(), Box<dyn Error>> {
     let now = std::time::Instant::now();
     for reduced_motion in [false, true] {

@@ -29,6 +29,9 @@ fn command() -> Result<ExitCode, CommandError> {
     let Some(arguments) = config::arguments()? else {
         return Ok(ExitCode::SUCCESS);
     };
+    if arguments.worktree.is_some() && arguments.command.is_some() {
+        return Err(CommandError::WorktreeCommand);
+    }
     let mut resume = None;
     let menu = match arguments.command {
         Some(config::Command::Update(options)) => {
@@ -155,7 +158,24 @@ fn command() -> Result<ExitCode, CommandError> {
         .build()
         .map_err(CommandError::Runtime)?;
     runtime.block_on(async {
+        let directory = std::env::current_dir().map_err(CommandError::Directory)?;
+        let directory = if let Some(name) = arguments.worktree {
+            let home = std::env::home_dir().ok_or(CommandError::Home)?;
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut interrupt = signal(SignalKind::interrupt()).map_err(CommandError::Signal)?;
+            let mut terminate = signal(SignalKind::terminate()).map_err(CommandError::Signal)?;
+            let directory = tokio::select! {
+                result = cocoa::worktree::create(&directory, &home, &name) => result?,
+                _ = interrupt.recv() => return Err(CommandError::Interrupted),
+                _ = terminate.recv() => return Err(CommandError::Interrupted),
+            };
+            eprintln!("Worktree: {} (branch {name})", directory.display());
+            directory
+        } else {
+            directory
+        };
         let result = tui::run(
+            directory,
             arguments.prompt,
             config::Selection {
                 alias: arguments.alias,
@@ -178,6 +198,18 @@ fn command() -> Result<ExitCode, CommandError> {
 
 #[derive(Debug, thiserror::Error)]
 enum CommandError {
+    #[error("--worktree is supported only for fresh interactive sessions, without a subcommand")]
+    WorktreeCommand,
+    #[error("worktree creation interrupted; inspect Git worktrees before retrying")]
+    Interrupted,
+    #[error("cannot install worktree signal handlers")]
+    Signal(#[source] std::io::Error),
+    #[error("cannot determine the home directory")]
+    Home,
+    #[error("cannot read the launch directory")]
+    Directory(#[source] std::io::Error),
+    #[error(transparent)]
+    Worktree(#[from] cocoa::worktree::Error),
     #[error(transparent)]
     Update(#[from] cocoa::update::Error),
     #[error(transparent)]

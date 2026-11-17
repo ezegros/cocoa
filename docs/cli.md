@@ -13,6 +13,7 @@ Without a subcommand, Cocoa opens interactive chat. An optional prompt sends imm
 
 | Option | Purpose |
 | --- | --- |
+| `-w, --worktree NAME` | Create a branch and isolated worktree for a fresh interactive session; name required |
 | `-m, --model MODEL` | Configured alias or direct `provider/model` |
 | `--thinking LEVEL` | Thinking for a direct `--model` selection; `default` omits it |
 | `-a, --alias ALIAS` | Select a configured alias; conflicts with `--model` |

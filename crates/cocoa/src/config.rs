@@ -335,6 +335,9 @@ pub struct Arguments {
     pub command: Option<Command>,
     /// Start a session and submit this prompt without exiting after the answer.
     pub prompt: Option<String>,
+    /// Create a Git worktree and branch named NAME for a fresh interactive session.
+    #[arg(short = 'w', long, global = true, value_name = "NAME")]
+    pub worktree: Option<String>,
     /// Alias name to start on, overriding the configured default_alias.
     #[arg(short, long, global = true)]
     pub alias: Option<String>,

@@ -3654,6 +3654,14 @@ fn display_label(text: &str, limit: usize) -> String {
 }
 
 fn directory_title(directory: &str, width: usize) -> String {
+    let directory = directory
+        .split_once("/.config/cocoa/worktrees/")
+        .filter(|(home, _)| {
+            *home == "~" || std::env::home_dir().is_some_and(|path| path == Path::new(home))
+        })
+        .and_then(|(_, relative)| relative.split_once('/'))
+        .filter(|(repository, name)| !repository.is_empty() && !name.is_empty())
+        .map_or(directory, |(_, name)| name);
     if Line::from(directory).width() <= width {
         return directory.to_owned();
     }

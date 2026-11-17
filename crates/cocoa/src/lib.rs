@@ -13,6 +13,7 @@ pub mod update;
 pub mod usage;
 pub mod web_search;
 pub mod workspace;
+pub mod worktree;
 
 mod brand;
 mod context;

@@ -255,6 +255,107 @@ fn saved_and_cli_reduced_motion_keep_a_static_bar_without_writing_settings() -> 
 }
 
 #[test]
+fn interrupting_worktree_startup_stops_git_before_exiting() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home("worktree-interrupt", &server.endpoint, true, None)?;
+    let executable = home.join("git");
+    fs::write(
+        &executable,
+        "#!/bin/sh\necho $$ > \"$HOME/git.pid\"\nexec /bin/sleep 60\n",
+    )?;
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))?;
+    let mut session = Terminal::spawn_with_environment(
+        &home,
+        &["-w", "interrupted"],
+        100,
+        26,
+        None,
+        &[("PATH", home.as_os_str())],
+    )?;
+    session.until(|_| home.join("git.pid").exists())?;
+    let process = read_pid(&home.join("git.pid"))?;
+    session.interrupt()?;
+    session.finish(1)?;
+    assert!(session.contains("worktree creation interrupted"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_exists(process)? && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_exists(process)?,
+        "Git must stop after startup is interrupted"
+    );
+    assert!(!home.join(".config/cocoa/worktrees").exists());
+    server.finish()
+}
+
+#[tokio::test]
+async fn worktree_session_records_its_directory_and_keeps_relative_storage() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home("worktree-startup", &server.endpoint, true, None)?;
+    for arguments in [
+        vec!["init"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .args(arguments)
+            .current_dir(&home)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let mut session = Terminal::spawn(
+        &home,
+        &["-w", "fix-login", "--data-dir", "session-data"],
+        110,
+        36,
+        None,
+    )?;
+    session.wait_text(" medium ")?;
+    session.command("start a conversation")?;
+    session.wait_text("answer-1")?;
+    close_command_session(&mut session)?;
+    let database = SessionDatabase::open(&home.join("session-data/sessions.sqlite3"))
+        .await
+        .map_err(io::Error::other)?;
+    let page = database
+        .list_sessions(None, 20, None)
+        .await
+        .map_err(io::Error::other)?;
+    assert_eq!(page.sessions.len(), 1);
+    let saved = database
+        .resolve_session(page.sessions[0].public_id.as_str())
+        .await
+        .map_err(io::Error::other)?;
+    assert!(
+        saved
+            .working_directory
+            .starts_with(home.join(".config/cocoa/worktrees").canonicalize()?)
+    );
+    assert_eq!(
+        saved.working_directory.file_name(),
+        Some(std::ffi::OsStr::new("fix-login"))
+    );
+    assert!(!saved.working_directory.join("session-data").exists());
+    assert!(saved.working_directory.exists());
+    server.finish()
+}
+
+#[test]
 fn exit_prints_resume_command_with_quoted_data_directory() -> io::Result<()> {
     let root = Homes::new()?;
     let server = Provider::start(ProviderKind::Commands)?;
