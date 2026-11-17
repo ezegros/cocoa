@@ -2484,7 +2484,7 @@ fn child_http_recovery_preserves_edits_and_continues_after_a_rejected_tool_call(
     let child_row = session
         .screen()
         .lines()
-        .position(|line| line.contains("licenses-cli · Provider paused"))
+        .position(|line| line.contains("Licenses Cli · Provider paused"))
         .ok_or_else(|| io::Error::other("missing paused child header"))?
         + 1;
     session.send(format!("\x1b[<0;8;{child_row}M\x1b[<0;8;{child_row}m").as_bytes())?;
