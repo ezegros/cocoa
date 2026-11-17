@@ -726,7 +726,21 @@ impl Chat {
                     agent: Some(agent),
                     kind: ActivityKind::Agent,
                 };
-                self.insert_activity(key, Some(parent), &update.name);
+                let mut title = String::with_capacity(update.name.len());
+                for word in update.name.split(['-', '_']) {
+                    let mut characters = word.chars();
+                    if let Some(first) = characters.next() {
+                        if !title.is_empty() {
+                            title.push(' ');
+                        }
+                        title.push(first.to_ascii_uppercase());
+                        title.extend(characters.map(|character| character.to_ascii_lowercase()));
+                    }
+                }
+                if title.is_empty() {
+                    title.push_str(&update.name);
+                }
+                self.insert_activity(key, Some(parent), &title);
                 self.agents.push(AgentActivity {
                     session: update.session,
                     id: update.agent,
@@ -3094,7 +3108,9 @@ impl Activity {
     ) -> Line<'static> {
         let palette = theme.palette();
         let working = self.state.is_running() || running_children;
-        let indicator = if matches!(self.key.kind, ActivityKind::Work) {
+        let indicator = if matches!(self.key.kind, ActivityKind::Work | ActivityKind::Agent)
+            && self.provider_notice.is_none()
+        {
             work_indicator(width, loader.filter(|_| working))
         } else {
             ""
@@ -3114,8 +3130,13 @@ impl Activity {
                 self.provider_notice.as_deref().unwrap_or_default(),
             ),
             ActivityKind::Agent => format!(
-                "{} Agent {}",
+                "{}{} {}",
                 self.title,
+                if self.title == "Agent" || self.title.ends_with(" Agent") {
+                    ""
+                } else {
+                    " Agent"
+                },
                 if working {
                     decorative
                 } else if matches!(

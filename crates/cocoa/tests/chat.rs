@@ -4501,8 +4501,11 @@ fn pod_press_keeps_its_timing_and_fixed_group_slot_and_stops_on_completion()
             let view = render(&mut chat, width, 16)?;
             assert!(view.contains(&format!("  {mini} {label} ▾")), "{view}");
             assert_eq!(view.matches(full).count(), 1, "{view}");
-            assert_eq!(view.matches(mini).count(), 1, "{view}");
-            assert!(view.contains(&format!("Peer Agent {label} ▸")), "{view}");
+            assert_eq!(view.matches(mini).count(), 2, "{view}");
+            assert!(
+                view.contains(&format!("{mini} Peer Agent {label} ▸")),
+                "{view}"
+            );
             assert_eq!(view.matches(label).count(), 3, "{view}");
             assert_eq!(
                 view.lines().find_map(|line| line.find(label)),
@@ -4670,10 +4673,13 @@ fn pod_press_is_static_in_reduced_motion_and_quiet_during_recovery() -> Result<(
         let active = render(&mut chat, 40, 20)?;
         assert!(active.contains(&format!("  {mini} Toasting ▾")), "{active}");
         assert!(active.contains(&format!("╭ {full}Toasting ─")), "{active}");
-        assert!(active.contains("Peer Agent Toasting ▸"), "{active}");
         assert_eq!(active.matches("Toasting").count(), 3, "{active}");
         assert_eq!(active.matches(full).count(), 1, "{active}");
-        assert_eq!(active.matches(mini).count(), 1, "{active}");
+        assert_eq!(active.matches(mini).count(), 2, "{active}");
+        assert!(
+            active.contains(&format!("{mini} Peer Agent Toasting ▸")),
+            "{active}"
+        );
         if reduced_motion {
             for elapsed in [
                 Duration::from_nanos(5_759_999_999),
@@ -5305,8 +5311,8 @@ fn work_finishes_only_after_the_root_and_every_agent_settle() -> Result<(), Box<
                 });
             }
             let view = render(&mut chat, 64, 32)?;
-            assert!(view.contains("Alpha Agent Toasting"), "{view}");
-            assert!(view.contains("Beta Agent Toasting"), "{view}");
+            assert!(view.contains("(o) Alpha Agent Toasting"), "{view}");
+            assert!(view.contains("(o) Beta Agent Toasting"), "{view}");
             assert!(!view.contains("Work Done"), "{view}");
             chat.observe_agent(&AgentUpdate {
                 session: 10,
@@ -5319,15 +5325,17 @@ fn work_finishes_only_after_the_root_and_every_agent_settle() -> Result<(), Box<
             }
             let view = render(&mut chat, 64, 32)?;
             assert!(view.contains("Alpha Agent Worked"), "{view}");
-            assert!(view.contains("Beta Agent Toasting"), "{view}");
+            assert!(!view.contains("(o) Alpha Agent"), "{view}");
+            assert!(view.contains("(o) Beta Agent Toasting"), "{view}");
             assert!(!view.contains("Work Done"), "{view}");
             assert!(view.contains("(o) Toasting ▾"), "{view}");
-            assert_eq!(view.matches("(o)").count(), 1, "{view}");
+            assert_eq!(view.matches("(o)").count(), 2, "{view}");
             assert_eq!(view.contains(" (o|o) "), !root_first, "{view}");
             assert!(chat.tick(Duration::from_millis(480)));
             let view = render(&mut chat, 64, 32)?;
             assert!(view.contains("(|) Toasting ▾"), "{view}");
-            assert_eq!(view.matches("(|)").count(), 1, "{view}");
+            assert!(view.contains("(|) Beta Agent Toasting"), "{view}");
+            assert_eq!(view.matches("(|)").count(), 2, "{view}");
             assert_eq!(view.contains(" (|||) "), !root_first, "{view}");
             chat.observe_agent(&AgentUpdate {
                 session: 10,
@@ -5740,46 +5748,60 @@ fn collapsed_agents_hide_descendants_from_keyboard_and_mouse() -> Result<(), Box
 #[test]
 fn accepted_spawn_rows_are_replaced_by_agents_in_either_event_order() -> Result<(), Box<dyn Error>>
 {
-    for agent_first in [false, true] {
-        let mut chat = Chat::new(128)?;
-        type_text(&mut chat, "delegate");
-        chat.input(key(KeyCode::Enter, KeyModifiers::NONE));
-        observe_root_event(&mut chat, EventKind::ModelStarted { round: 1 });
-        for started in [agent_first, !agent_first] {
-            if started {
-                chat.observe_agent(&AgentUpdate {
-                    session: 10,
-                    agent: fixture_agent("Reviewer"),
-                    name: "Reviewer".into(),
-                    kind: AgentUpdateKind::Started,
-                });
-            } else {
-                observe_root_event(
-                    &mut chat,
-                    EventKind::CapabilityInput {
-                        operation: OperationId(1),
-                        title: "cocoa.spawn".into(),
-                        text: "Reviewer".into(),
-                        summary: None,
-                        truncated: false,
-                    },
-                );
+    for (name, label) in [
+        ("Reviewer", "Reviewer Agent"),
+        ("sub-agent", "Sub Agent"),
+        ("code_review", "Code Review Agent"),
+        ("--mIXed__case-", "Mixed Case Agent"),
+        ("agent", "Agent"),
+        ("agent007", "Agent007 Agent"),
+        ("---", "--- Agent"),
+    ] {
+        for agent_first in [false, true] {
+            let mut chat = Chat::new(128)?;
+            type_text(&mut chat, "delegate");
+            chat.input(key(KeyCode::Enter, KeyModifiers::NONE));
+            observe_root_event(&mut chat, EventKind::ModelStarted { round: 1 });
+            for started in [agent_first, !agent_first] {
+                if started {
+                    chat.observe_agent(&AgentUpdate {
+                        session: 10,
+                        agent: fixture_agent(name),
+                        name: name.into(),
+                        kind: AgentUpdateKind::Started,
+                    });
+                } else {
+                    observe_root_event(
+                        &mut chat,
+                        EventKind::CapabilityInput {
+                            operation: OperationId(1),
+                            title: "cocoa.spawn".into(),
+                            text: name.into(),
+                            summary: None,
+                            truncated: false,
+                        },
+                    );
+                }
             }
+            observe_root_event(
+                &mut chat,
+                EventKind::CapabilityFinished {
+                    operation: OperationId(1),
+                    status: ActivityStatus::Completed,
+                },
+            );
+            let view = render(&mut chat, 64, 32)?;
+            assert_eq!(
+                view.matches(&format!("(o) {label} Toasting ▸")).count(),
+                1,
+                "{view}"
+            );
+            assert!(!view.contains("cocoa.spawn"), "{view}");
+            chat.input(key(KeyCode::Tab, KeyModifiers::NONE));
+            chat.input(key(KeyCode::Right, KeyModifiers::NONE));
+            let view = render(&mut chat, 64, 32)?;
+            assert!(!view.contains("cocoa.spawn"), "{view}");
         }
-        observe_root_event(
-            &mut chat,
-            EventKind::CapabilityFinished {
-                operation: OperationId(1),
-                status: ActivityStatus::Completed,
-            },
-        );
-        let view = render(&mut chat, 64, 32)?;
-        assert_eq!(view.matches("Reviewer Agent Toasting").count(), 1, "{view}");
-        assert!(!view.contains("cocoa.spawn"), "{view}");
-        chat.input(key(KeyCode::Tab, KeyModifiers::NONE));
-        chat.input(key(KeyCode::Right, KeyModifiers::NONE));
-        let view = render(&mut chat, 64, 32)?;
-        assert!(!view.contains("cocoa.spawn"), "{view}");
     }
     let mut chat = Chat::new(128)?;
     type_text(&mut chat, "delegate");
