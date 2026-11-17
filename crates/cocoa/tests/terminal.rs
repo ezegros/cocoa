@@ -28,6 +28,109 @@ use std::{
 use terminal::Terminal;
 
 #[test]
+fn first_message_and_draft_remain_visible_while_session_initialization_is_blocked() -> io::Result<()>
+{
+    assert_responsive_startup(StartupCompletion::Respond)
+}
+
+#[test]
+fn cancellation_during_session_initialization_preserves_the_draft_without_sending() -> io::Result<()>
+{
+    assert_responsive_startup(StartupCompletion::Cancel)
+}
+
+#[test]
+fn exit_during_session_initialization_waits_for_cleanup_without_sending() -> io::Result<()> {
+    assert_responsive_startup(StartupCompletion::Exit)
+}
+
+#[derive(Clone, Copy)]
+enum StartupCompletion {
+    Respond,
+    Cancel,
+    Exit,
+}
+
+fn assert_responsive_startup(completion: StartupCompletion) -> io::Result<()> {
+    let root = Homes::new()?;
+    let provider = Provider::start(ProviderKind::Commands)?;
+    let mcp = Provider::start(ProviderKind::StartupMcp)?;
+    let home = root.command_home("blocked-startup", &provider.endpoint, true, None)?;
+    let path = home.join(".config/cocoa/config.json");
+    let mut configuration: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    configuration["mcp_servers"] = json!({"startup": {
+        "id": "0123456789abcdef0123456789abcdef",
+        "url": mcp.endpoint,
+        "enabled": true,
+        "headers_env": {"authorization": "FIXTURE_KEY"}
+    }});
+    fs::write(&path, serde_json::to_vec(&configuration)?)?;
+    let mut terminal = Terminal::spawn(&home, &[], 90, 28, None)?;
+    terminal.wait_text(" medium ")?;
+    terminal.command("startup-message-sentinel")?;
+    terminal.until(|_| mcp.events.cycle_started.load(Ordering::SeqCst))?;
+    terminal.wait_text("startup-message-sentinel")?;
+    assert!(provider.requests()?.is_empty());
+
+    terminal.resize(70, 24)?;
+    terminal.command("/model another-model")?;
+    terminal.wait_text("Draft unchanged")?;
+    assert!(terminal.contains("/model another-model"));
+    terminal.key(b"\x15")?;
+    let image_path = home.join("startup.png");
+    image::RgbImage::from_pixel(1, 1, image::Rgb([180, 30, 80]))
+        .save(&image_path)
+        .map_err(io::Error::other)?;
+    terminal.text(&format!("{} ", image_path.display()))?;
+    terminal.wait_text("[Image 1]")?;
+    terminal.text("startup-draft-sentinel")?;
+    terminal.wait_text("startup-draft-sentinel")?;
+    assert!(terminal.contains("startup-message-sentinel"));
+    assert!(!mcp.events.cycle_release.load(Ordering::SeqCst));
+    assert!(provider.requests()?.is_empty());
+
+    match completion {
+        StartupCompletion::Respond => {}
+        StartupCompletion::Cancel => {
+            terminal.key(b"\x1b")?;
+            terminal.key(b"\x1b")?;
+        }
+        StartupCompletion::Exit => {
+            terminal.key(b"\x15")?;
+            terminal.command(":q")?;
+        }
+    }
+    if !matches!(completion, StartupCompletion::Respond) {
+        terminal.wait_text("Stopping")?;
+        assert!(!terminal.exited());
+        assert!(provider.requests()?.is_empty());
+    }
+    mcp.events.cycle_release.store(true, Ordering::SeqCst);
+    if matches!(completion, StartupCompletion::Exit) {
+        terminal.finish(0)?;
+        assert!(provider.requests()?.is_empty());
+    } else {
+        if matches!(completion, StartupCompletion::Cancel) {
+            assert_cancelled_idle(&mut terminal)?;
+            assert!(provider.requests()?.is_empty());
+        } else {
+            terminal.wait_text("answer-1")?;
+            assert_eq!(provider.requests()?.len(), 1);
+        }
+        assert!(terminal.contains("startup-draft-sentinel"));
+        terminal.key(b"\x15")?;
+        if matches!(completion, StartupCompletion::Cancel) {
+            terminal.command("after-startup-cancellation")?;
+            terminal.wait_text("answer-1")?;
+            assert_eq!(provider.requests()?.len(), 1);
+        }
+        close_command_session(&mut terminal)?;
+    }
+    mcp.finish()?;
+    provider.finish()
+}
+
+#[test]
 fn configured_themes_and_cli_overrides_apply_before_any_model_request() -> io::Result<()> {
     let root = Homes::new()?;
     let server = Provider::start(ProviderKind::Commands)?;
@@ -3149,6 +3252,7 @@ enum ProviderKind {
     Steering,
     Streaming,
     StartupFallback,
+    StartupMcp,
 }
 
 #[derive(Clone)]
@@ -3329,6 +3433,28 @@ fn handle_request(
     state: &Mutex<ProviderState>,
 ) -> io::Result<()> {
     let request = read_request(&mut stream)?;
+    if matches!(kind, ProviderKind::StartupMcp) {
+        let result = match request.body["method"].as_str() {
+            Some("tools/list") => {
+                events.cycle_started.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + Duration::from_secs(45);
+                while !events.cycle_release.load(Ordering::SeqCst) {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::other("MCP initialization was not released"));
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                json!({"tools":[]})
+            }
+            _ => return Err(io::Error::other("unexpected startup MCP method")),
+        };
+        return write_response(
+            &mut stream,
+            "200 OK",
+            "application/json",
+            &json!({"jsonrpc":"2.0","id":request.body["id"],"result":result}).to_string(),
+        );
+    }
     assert_eq!(request.body["stream"], true);
     for secret in [
         "fixture-key",
@@ -3349,6 +3475,7 @@ fn handle_request(
         state.requests.len()
     };
     let output = match kind {
+        ProviderKind::StartupMcp => return Err(io::Error::other("MCP request reached provider")),
         ProviderKind::StartupFallback => {
             if request.body["model"] == "failed-primary" {
                 return stream.write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");

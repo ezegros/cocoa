@@ -76,12 +76,38 @@ enum SessionError {
         source: io::Error,
         settlement: Option<Box<RunError>>,
     },
+    #[error("terminal failed during startup{}", if .initialization.is_some() { "; initialization also failed" } else { "" })]
+    StartupTerminal {
+        source: io::Error,
+        initialization: Option<Box<StartupError>>,
+    },
     #[error("invalid composer limits")]
     View(#[from] cocoa::chat::ChatError),
     #[error("session cleanup failed")]
     Cleanup,
     #[error(transparent)]
     Switch(#[from] Box<SwitchError>),
+}
+
+struct PreparedStartup {
+    session: Session,
+    model_label: String,
+    thinking_level: Option<ThinkingLevel>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum StartupError {
+    #[error(transparent)]
+    Persistence(#[from] SessionDataError),
+    #[error(transparent)]
+    Setup(#[from] crate::session::CommandError),
+}
+
+#[derive(Clone, Copy)]
+enum StartupDisposition {
+    Continue,
+    Cancel,
+    Exit,
 }
 
 pub(crate) async fn run(
@@ -652,24 +678,69 @@ async fn session(
                         dirty = true;
                     }
                     Action::Submit(input) => {
-                        commands.status = Status::Working("Running agent");
-                        commands.report_status()?;
-                        if attachment.is_none() {
-                            *attachment = Some(session_data::create(data_directory, &working_directory).await?);
-                        }
                         if owned.is_none() {
-                            let configuration = match resolve_selection(config::Selection { alias: alias.clone(), model: model.clone(), thinking, choice }).await {
-                                Ok(configuration) => configuration,
-                                Err(error) => { chat.reject(&error.to_string()); commands.status = Status::Error; dirty = true; continue; }
+                            commands.status = Status::Working("Running agent");
+                            commands.report_status()?;
+                            chat.set_message_steering(false);
+                            dirty = true;
+                            draw(terminal, chat, commands, &mut dirty, &mut animation_clock, Instant::now())?;
+                            let mcp = commands.mcp.clone();
+                            let initialization = async {
+                                if attachment.is_none() {
+                                    *attachment = Some(session_data::create(data_directory, &working_directory).await?);
+                                }
+                                let configuration = resolve_selection(config::Selection { alias: alias.clone(), model: model.clone(), thinking, choice })
+                                    .await.map_err(crate::session::CommandError::from)?;
+                                let model_label = configuration_label(&configuration);
+                                let thinking_level = configuration.thinking_level;
+                                let Some(attached) = attachment.as_ref() else { unreachable!("created above"); };
+                                let session = Session::new(configuration, attached.clone(), mcp).await?;
+                                Ok::<_, StartupError>(PreparedStartup { session, model_label, thinking_level })
                             };
-                            show_configuration(chat, &directory_label, &configuration);
-                            let Some(attached) = attachment.as_ref() else { unreachable!("created above"); };
-                            match Session::new(configuration, attached.clone(), commands.mcp.clone()).await {
-                                Ok(session) => { commands.mcp = Some(session.mcp.clone()); *owned = Some(session); },
-                                Err(error) if error.cleanup_unconfirmed() => return Err(SessionError::Recovery(Box::new(error))),
-                                Err(error) => { chat.reject(&error.to_string()); commands.status = Status::Error; dirty = true; continue; }
+                            let (result, disposition) = during_startup(initialization, terminal, chat, commands, interrupt).await;
+                            let initialization_error = match result {
+                                Ok(prepared) => {
+                                    show_selection(chat, &directory_label, &prepared.model_label, prepared.thinking_level);
+                                    commands.mcp = Some(prepared.session.mcp.clone());
+                                    chat.set_message_steering(prepared.session.message_steering);
+                                    *owned = Some(prepared.session);
+                                    None
+                                }
+                                Err(error) => Some(error),
+                            };
+                            let disposition = match disposition {
+                                Ok(disposition) => disposition,
+                                Err(source) => return Err(SessionError::StartupTerminal {
+                                    source,
+                                    initialization: initialization_error.map(Box::new),
+                                }),
+                            };
+                            let setup_error = match initialization_error {
+                                Some(StartupError::Persistence(error)) => return Err(error.into()),
+                                Some(StartupError::Setup(error)) if error.cleanup_unconfirmed() => {
+                                    return Err(SessionError::Recovery(Box::new(error)));
+                                }
+                                Some(StartupError::Setup(error)) => Some(error),
+                                None => None,
+                            };
+                            if matches!(disposition, StartupDisposition::Exit) {
+                                return Ok(());
+                            }
+                            if let Some(error) = setup_error {
+                                chat.reject(&error.to_string());
+                                commands.status = Status::Error;
+                                dirty = true;
+                                continue;
+                            }
+                            if matches!(disposition, StartupDisposition::Cancel) {
+                                chat.cancelled();
+                                commands.status = Status::Idle;
+                                dirty = true;
+                                continue;
                             }
                         }
+                        commands.status = Status::Working("Running agent");
+                        commands.report_status()?;
                         let Some(active) = owned.as_mut() else { unreachable!("session initialized above"); };
                         active.agent_updates.enable_recovery().await.map_err(|error| SessionError::Recovery(Box::new(crate::session::CommandError::Agents(error))))?;
                         if input.bytes() > active.input_bytes { chat.reject("Prompt exceeds the configured input byte budget."); commands.status = Status::Error; dirty = true; continue; }
@@ -1025,6 +1096,72 @@ async fn reset(
                         Ok(()) => {},
                         Err(error) => terminal_error = Some(error),
                     }
+                }
+            }
+        }
+    }
+}
+
+async fn during_startup<T>(
+    initialization: impl std::future::Future<Output = T>,
+    terminal: &mut DefaultTerminal,
+    chat: &mut Chat,
+    commands: &mut Commands,
+    interrupt: &mut Signal,
+) -> (T, io::Result<StartupDisposition>) {
+    tokio::pin!(initialization);
+    let mut tick = interval();
+    let mut dirty = true;
+    let mut animation_clock = Instant::now();
+    let mut disposition = StartupDisposition::Continue;
+    let mut terminal_error = None;
+    // Setup owns resources that must settle before cancellation or terminal errors escape.
+    loop {
+        tokio::select! {
+            biased;
+            _ = interrupt.recv() => {
+                disposition = match disposition {
+                    StartupDisposition::Continue => StartupDisposition::Cancel,
+                    StartupDisposition::Cancel | StartupDisposition::Exit => StartupDisposition::Exit,
+                };
+                chat.stopping();
+                dirty = true;
+            }
+            result = &mut initialization => {
+                return (result, match terminal_error {
+                    Some(error) => Err(error),
+                    None => Ok(disposition),
+                });
+            }
+            now = tick.tick() => {
+                if terminal_error.is_some() {
+                    continue;
+                }
+                dirty |= commands.poll(chat).await.changed;
+                match keyboard(chat, commands, &mut dirty) {
+                    Ok(Action::Exit) => {
+                        disposition = StartupDisposition::Exit;
+                        chat.stopping();
+                    }
+                    Ok(Action::Cancel) => {
+                        if !matches!(disposition, StartupDisposition::Exit) {
+                            disposition = StartupDisposition::Cancel;
+                        }
+                        chat.stopping();
+                    }
+                    Ok(Action::None | Action::Redraw) => {}
+                    Ok(Action::Command(command)) => {
+                        match chat.restore_prompt(&cocoa_core::model::UserInput::Text(command)) {
+                            Ok(()) => chat.input_notice("Session is starting. Draft unchanged; wait for setup to finish."),
+                            Err(error) => chat.input_notice(&error.to_string()),
+                        }
+                    }
+                    Ok(_) => chat.input_notice("Session is starting. Wait for setup to finish."),
+                    Err(error) => terminal_error = Some(error),
+                }
+                if terminal_error.is_none()
+                    && let Err(error) = draw(terminal, chat, commands, &mut dirty, &mut animation_clock, now) {
+                    terminal_error = Some(error);
                 }
             }
         }

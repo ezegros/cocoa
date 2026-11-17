@@ -4743,7 +4743,10 @@ fn composer_stats_stay_on_the_border_and_keep_completed_time() -> Result<(), Box
     assert!(top.contains("sonnet high"), "{narrow_ready}");
     chat.set_usage(Some(88.0), None);
     let subscription = render(&mut chat, 100, 16)?;
-    assert!(subscription.contains("sonnet high · C88%"), "{subscription}");
+    assert!(
+        subscription.contains("sonnet high · C88%"),
+        "{subscription}"
+    );
     assert!(!subscription.contains('$'), "{subscription}");
     chat.initial_prompt("next")?;
     chat.tick(Duration::from_secs(1));
