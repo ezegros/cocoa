@@ -990,7 +990,7 @@ impl ModelProvider for Control {
         request.limits.deadline = tokio::time::Instant::now() + self.timeout;
         for record in &mut request.context.records {
             match &mut record.kind {
-                RecordKind::ModelCompleted { response } => {
+                RecordKind::ModelCompleted { response, .. } => {
                     if let Some(continuation) = &mut response.continuation {
                         match self.tamper {
                             Some("provider") => {

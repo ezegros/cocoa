@@ -20,6 +20,72 @@ use cocoa_core::{
 use serde_json::{Value, json};
 
 #[tokio::test]
+async fn shared_deliveries_are_summary_evidence_and_return_after_compaction()
+-> Result<(), Box<dyn Error>> {
+    let store = store()?;
+    append(
+        &store,
+        1,
+        RecordKind::InputAccepted {
+            input: "Review".into(),
+        },
+    )
+    .await?;
+    let shared: cocoa_core::context::SharedContext = serde_json::from_value(json!({
+        "authority":"agent_authored",
+        "records":[{"key":"review","type":"observation","value":"original finding","labels":[],"owner":"7"}],
+        "omitted":2,
+    }))?;
+    let mut answer = final_answer("Reviewed");
+    let RecordKind::ModelCompleted { shared_context, .. } = &mut answer else {
+        return Err("expected model response".into());
+    };
+    *shared_context = Some(shared.clone());
+    let through = append(&store, 1, answer).await?;
+    append(
+        &store,
+        2,
+        RecordKind::InputAccepted {
+            input: "Continue".into(),
+        },
+    )
+    .await?;
+    let snapshot = store.load().await?;
+    let attempt = SummaryAttempt::prepare(&snapshot, through, policy())?;
+    let summary: Value = serde_json::from_str(&attempt.request().input)?;
+    assert_eq!(
+        summary["sources"][1]["shared_context"],
+        serde_json::to_value(&shared)?
+    );
+    let checkpoint =
+        Checkpoint::prepare(&snapshot, through, empty_proposal(), checkpoint_limits())?;
+    let mut context = BoundedContext
+        .prepare(snapshot.records.clone(), Vec::new(), 65536)
+        .await?
+        .context;
+    context.shared = Some(shared.clone());
+    assert!(context.shared_update().is_none());
+    let retained_bytes = context.encoded_size()?;
+    context.shared.as_mut().ok_or("missing snapshot")?.records[0]
+        .content
+        .value = json!("new finding");
+    assert_eq!(
+        context.shared_update().ok_or("missing update")?.records[0]
+            .content
+            .value,
+        "new finding"
+    );
+    assert!(context.encoded_size()? > retained_bytes);
+    let mut compacted = BoundedContext
+        .prepare_compacted(snapshot.records, Vec::new(), 65536, &checkpoint)
+        .await?
+        .context;
+    compacted.shared = Some(shared.clone());
+    assert_eq!(compacted.shared_update(), Some(&shared));
+    Ok(())
+}
+
+#[tokio::test]
 async fn summary_json_is_closed_complete_and_bound_to_one_attempt() -> Result<(), Box<dyn Error>> {
     let store = store()?;
     let user = append(
@@ -822,6 +888,7 @@ async fn active_reads_keep_sparse_sources_images_feedback_and_complete_suffix()
         &store,
         2,
         RecordKind::ModelCompleted {
+            shared_context: None,
             response: ModelResponse {
                 action: ModelAction::Execute {
                     cells: vec![Cell { code: "17".into() }, Cell { code: "18".into() }],
@@ -1075,6 +1142,7 @@ async fn append(
 
 fn final_answer(answer: &str) -> RecordKind {
     RecordKind::ModelCompleted {
+        shared_context: None,
         response: ModelResponse {
             action: ModelAction::Final {
                 answer: answer.into(),

@@ -154,7 +154,7 @@ impl SessionAttachment {
                 legacy_responses += completed.saturating_sub(recorded) as u64;
                 let mut records = history.records;
                 for record in &mut records {
-                    if let RecordKind::ModelCompleted { response } = &mut record.record.kind { response.continuation = None; }
+                    if let RecordKind::ModelCompleted { response, .. } = &mut record.record.kind { response.continuation = None; }
                 }
                 histories.insert(agent, ExportHistory { records, checkpoints: history.checkpoints, instruction_state: history.instruction_state });
             }

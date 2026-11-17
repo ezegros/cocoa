@@ -113,7 +113,7 @@ impl ModelProvider for ArithmeticModel {
                 }
             );
             assert!(context.records.iter().any(|record| matches!(&record.kind,
-            RecordKind::ModelCompleted { response } if response.continuation == Some(ProviderData {
+            RecordKind::ModelCompleted { response, .. } if response.continuation == Some(ProviderData {
                 provider: "fixture".into(), data: json!({"opaque": [7, "keep"]})
             }))));
             Ok(ModelResponse {
@@ -2410,7 +2410,8 @@ async fn host_fatal_errors_cannot_be_downgraded_to_cell_feedback() -> Result<(),
                     response: ModelResponse {
                         action: ModelAction::Final { .. },
                         ..
-                    }
+                    },
+                    ..
                 }
             )),
             recoverable
@@ -2527,7 +2528,7 @@ impl ModelProvider for ResumeModel {
                 .instructions
                 .contains("Read files again before mutation")
         );
-        assert!(request.context.records.iter().any(|record| matches!(&record.kind, RecordKind::ModelCompleted { response } if response.continuation.is_some())));
+        assert!(request.context.records.iter().any(|record| matches!(&record.kind, RecordKind::ModelCompleted { response, .. } if response.continuation.is_some())));
         Ok(ModelResponse {
             action: ModelAction::Final {
                 answer: "history survived".into(),
@@ -3235,7 +3236,7 @@ impl ModelProvider for SelectiveSummaryModel {
     ) -> Result<ModelResponse, ModelError> {
         assert!(request.context.checkpoint.is_some());
         assert!(!request.context.records.iter().any(|record| matches!(
-            &record.kind, RecordKind::ModelCompleted { response }
+            &record.kind, RecordKind::ModelCompleted { response, .. }
                 if matches!(&response.action, ModelAction::Final { answer } if answer.contains("retired detail"))
         )));
         Ok(ModelResponse {
@@ -3257,6 +3258,7 @@ async fn selective_store() -> Result<(Arc<SelectiveStore>, RecordId), Box<dyn Er
                 input: format!("Task {invocation}").into(),
             },
             RecordKind::ModelCompleted {
+                shared_context: None,
                 response: ModelResponse {
                     action: ModelAction::Final {
                         answer: "retired detail ".repeat(400),

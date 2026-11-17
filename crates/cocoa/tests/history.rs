@@ -447,6 +447,7 @@ async fn archived_messages_execution_images_receipts_and_checkpoints_survive_rec
             &Record {
                 invocation: InvocationId(1),
                 kind: RecordKind::ModelCompleted {
+                    shared_context: None,
                     response: ModelResponse {
                         action: ModelAction::Execute {
                             cells: vec![Cell {
@@ -550,6 +551,7 @@ async fn archived_messages_execution_images_receipts_and_checkpoints_survive_rec
             &Record {
                 invocation: InvocationId(1),
                 kind: RecordKind::ModelCompleted {
+                    shared_context: None,
                     response: ModelResponse {
                         action: ModelAction::Final {
                             answer: "archived assistant needle ".repeat(500),

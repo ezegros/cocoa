@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use crate::{
     capability::OperationOutcome,
     compaction::{Checkpoint, StoredCheckpoint},
-    context::{InstructionContent, InstructionDelivery, InstructionState},
+    context::{InstructionContent, InstructionDelivery, InstructionState, SharedContext},
     execution::{CellResponse, RuntimeState},
     model::{ModelResponse, UserInput},
 };
@@ -156,6 +156,10 @@ pub enum RecordKind {
     },
     ModelCompleted {
         response: ModelResponse,
+        /// Shared snapshot delivered immediately before this response. Retained
+        /// atomically with acceptance so retries cannot advance delivery history.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shared_context: Option<SharedContext>,
     },
     /// Committed before execution. `cell` is a zero-based ordinal in `model`.
     CellStarted {

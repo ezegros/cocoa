@@ -947,7 +947,7 @@ async fn configured_compaction_applies_to_direct_root_and_child_requests()
         history.validate_checkpoints()?;
         assert!(history.records.iter().any(|stored| {
             matches!(&stored.record.kind,
-                cocoa_core::store::RecordKind::ModelCompleted { response }
+                cocoa_core::store::RecordKind::ModelCompleted { response, .. }
                 if matches!(&response.action, cocoa_core::model::ModelAction::Execute { cells }
                     if cells.iter().any(|cell| cell.code.contains(&"x".repeat(140 * 1024)))))
         }));

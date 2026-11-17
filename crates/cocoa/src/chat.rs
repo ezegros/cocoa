@@ -1150,7 +1150,7 @@ impl Chat {
                         ));
                     }
                 }
-                RecordKind::ModelCompleted { response } => {
+                RecordKind::ModelCompleted { response, .. } => {
                     if let ModelAction::Final { answer } = &response.action {
                         self.append_history(MessageKind::Assistant, answer);
                     }

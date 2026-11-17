@@ -324,7 +324,7 @@ fn history_repairs(
         let invocation = stored.record.invocation.0;
         invocations.insert(invocation);
         match &stored.record.kind {
-            RecordKind::ModelCompleted { response } => {
+            RecordKind::ModelCompleted { response, .. } => {
                 if let ModelAction::Execute { cells } = &response.action {
                     models.insert(stored.id, (invocation, cells));
                 }

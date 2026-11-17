@@ -541,7 +541,7 @@ fn participant_evidence(name: &str, records: &[Record]) -> Value {
     for record in records {
         match &record.kind {
             RecordKind::InputAccepted { .. } => outcome = None,
-            RecordKind::ModelCompleted { response } => match &response.action {
+            RecordKind::ModelCompleted { response, .. } => match &response.action {
                 ModelAction::Execute { cells } => {
                     let ordinal = ordinals.entry(record.invocation.0).or_insert(0_u64);
                     for cell in cells {

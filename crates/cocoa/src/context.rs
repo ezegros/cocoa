@@ -32,7 +32,6 @@ const SHARED_BYTES_MAX: usize = 64 * 1024;
 pub(crate) struct ContextSnapshot {
     shared: SharedContext,
     required: usize,
-    required_bytes: usize,
 }
 
 pub(crate) fn bind(
@@ -50,8 +49,12 @@ pub(crate) fn bind_assembler(
 }
 
 impl ContextSnapshot {
-    fn finish(mut self, bytes: usize) -> Result<SharedContext, ContextError> {
-        while encoded_size(&self.shared)? > bytes {
+    fn finish(
+        mut self,
+        bytes: usize,
+        delivered: Option<&SharedContext>,
+    ) -> Result<SharedContext, ContextError> {
+        while delivered != Some(&self.shared) && encoded_size(&self.shared)? > bytes {
             if self.shared.records.len() == self.required {
                 return Err(ContextError::Limit);
             }
@@ -105,7 +108,6 @@ impl ContextRecords {
             }
         }
         let required = shared.records.len();
-        let required_bytes = encoded_size(&shared)?;
         for record in self
             .records
             .values()
@@ -119,11 +121,7 @@ impl ContextRecords {
                 break;
             }
         }
-        Ok(Some(ContextSnapshot {
-            shared,
-            required,
-            required_bytes,
-        }))
+        Ok(Some(ContextSnapshot { shared, required }))
     }
 
     pub(crate) fn call(
@@ -371,27 +369,13 @@ impl SessionContext {
         checkpoint: Option<&Checkpoint>,
     ) -> Result<PreparedContext, ContextError> {
         let snapshot = self.participant.context_snapshot().await?;
-        let inner_bytes = bytes
-            .checked_sub(
-                snapshot
-                    .as_ref()
-                    .map_or(0, |snapshot| snapshot.required_bytes),
-            )
-            .ok_or(ContextError::Limit)?;
         let mut prepared = match checkpoint {
             Some(checkpoint) => {
                 self.inner
-                    .prepare_compacted(records, capabilities, inner_bytes, checkpoint)
+                    .prepare_compacted(records, capabilities, bytes, checkpoint)
                     .await?
             }
-            None => {
-                self.inner
-                    .prepare(records, capabilities, inner_bytes)
-                    .await?
-            }
-        };
-        let Some(snapshot) = snapshot else {
-            return Ok(prepared);
+            None => self.inner.prepare(records, capabilities, bytes).await?,
         };
         let context = &mut prepared.context;
         if context.shared.is_some() {
@@ -399,10 +383,22 @@ impl SessionContext {
                 message: "A session context assembler is already installed".into(),
             });
         }
+        let delivered = context.shared_delivered();
+        let snapshot = match snapshot {
+            Some(snapshot) => snapshot,
+            None if delivered.is_some() => ContextSnapshot {
+                shared: SharedContext {
+                    records: Vec::new(),
+                    omitted: 0,
+                },
+                required: 0,
+            },
+            None => return Ok(prepared),
+        };
         let remaining = bytes
             .checked_sub(context.encoded_size()?)
             .ok_or(ContextError::Limit)?;
-        context.shared = Some(snapshot.finish(remaining.min(SHARED_BYTES_MAX))?);
+        context.shared = Some(snapshot.finish(remaining.min(SHARED_BYTES_MAX), delivered)?);
         debug_assert!(
             context.encoded_size()? <= bytes,
             "shared data must fit alongside required history and project instructions"

@@ -274,7 +274,7 @@ async fn archive_catch_up_reclaims_space_without_discarding_evidence() -> Result
             .await?
             .ok_or("missing archived evidence")?;
         assert!(
-            matches!(record.record.kind, RecordKind::ModelCompleted { response: ModelResponse { action: ModelAction::Final { answer }, .. } } if answer.len() == 5 * 1024 * 1024 && answer.chars().all(|value| value == character))
+            matches!(record.record.kind, RecordKind::ModelCompleted { response: ModelResponse { action: ModelAction::Final { answer }, .. }, .. } if answer.len() == 5 * 1024 * 1024 && answer.chars().all(|value| value == character))
         );
     }
     println!("storage before={before:?}; after bounded catch-up={after:?}");
@@ -719,6 +719,7 @@ async fn append_record(
 
 fn final_answer(answer: &str) -> RecordKind {
     RecordKind::ModelCompleted {
+        shared_context: None,
         response: ModelResponse {
             action: ModelAction::Final {
                 answer: answer.into(),

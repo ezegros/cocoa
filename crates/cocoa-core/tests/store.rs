@@ -663,6 +663,7 @@ fn model() -> Record {
     Record {
         invocation: InvocationId(1),
         kind: RecordKind::ModelCompleted {
+            shared_context: None,
             response: ModelResponse {
                 action: ModelAction::Final {
                     answer: "complete".into(),

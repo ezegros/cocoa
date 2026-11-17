@@ -97,7 +97,13 @@ pub(crate) fn body(
                     messages.push(json!({"role":"user","content":parts}));
                 }
             }
-            RecordKind::ModelCompleted { response } if pending.is_empty() => {
+            RecordKind::ModelCompleted {
+                response,
+                shared_context,
+            } if pending.is_empty() => {
+                if let Some(shared) = crate::shared_context(shared_context.as_ref())? {
+                    messages.push(json!({"role":"user","content":shared}));
+                }
                 let continuation = response
                     .continuation
                     .as_ref()
@@ -159,7 +165,7 @@ pub(crate) fn body(
     if !pending.is_empty() {
         return Err(protocol("missing cell feedback"));
     }
-    if let Some(shared) = crate::shared_context(request)? {
+    if let Some(shared) = crate::shared_context(request.context.shared_update())? {
         messages.push(json!({"role":"user","content":shared}));
     }
     encode_messages(

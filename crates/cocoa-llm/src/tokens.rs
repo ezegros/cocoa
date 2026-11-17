@@ -20,7 +20,7 @@ pub(crate) fn budget(
     let estimated = estimate(request, execution, limits)?;
     let mut input_tokens = estimated;
     for record in request.context.records.iter().rev() {
-        let RecordKind::ModelCompleted { response } = &record.kind else {
+        let RecordKind::ModelCompleted { response, .. } = &record.kind else {
             continue;
         };
         let Some(usage) = &response.usage else {
@@ -66,7 +66,7 @@ fn estimate(
     if let Some(checkpoint) = crate::checkpoint_context(request)? {
         tokens = tokens.saturating_add(text(&checkpoint) + 16);
     }
-    if let Some(shared) = crate::shared_context(request)? {
+    if let Some(shared) = crate::shared_context(request.context.shared_update())? {
         tokens = tokens.saturating_add(text(&shared) + 16);
     }
     for (index, record) in request.context.records.iter().enumerate() {
@@ -74,7 +74,14 @@ fn estimate(
             RecordKind::InputAccepted { input } => {
                 text(input.text()).saturating_add(input.images().len() as u64 * 16_384)
             }
-            RecordKind::ModelCompleted { response } => response_tokens(response, limits),
+            RecordKind::ModelCompleted {
+                response,
+                shared_context,
+            } => {
+                let shared = crate::shared_context(shared_context.as_ref())?;
+                response_tokens(response, limits)
+                    .saturating_add(shared.as_ref().map_or(0, |shared| text(shared) + 16))
+            }
             RecordKind::CellCompleted { outcome, .. } => {
                 text(&crate::execution_feedback(request, index, outcome)?)
             }

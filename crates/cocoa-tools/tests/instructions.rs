@@ -1091,6 +1091,7 @@ async fn checkpoint_projection_reattaches_scoped_rules_without_acknowledging_del
         Record {
             invocation,
             kind: RecordKind::ModelCompleted {
+                shared_context: None,
                 response: ModelResponse {
                     action: ModelAction::Execute {
                         cells: vec![Cell {

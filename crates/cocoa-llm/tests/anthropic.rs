@@ -305,7 +305,10 @@ async fn small_windows_fit_wire_output_to_remaining_context() -> Result<(), Box<
             );
             request.context.records.push(Record {
                 invocation: request.context.records[0].invocation,
-                kind: RecordKind::ModelCompleted { response },
+                kind: RecordKind::ModelCompleted {
+                    response,
+                    shared_context: None,
+                },
             });
             let budget = provider
                 .request_token_budget(&request)?
@@ -327,7 +330,7 @@ async fn small_windows_fit_wire_output_to_remaining_context() -> Result<(), Box<
             // depending on the estimator's text ratio or message framing.
             let retained_tokens = budget.input_tokens - 29;
             for input_tokens in [input_limit, input_limit + 1] {
-                let RecordKind::ModelCompleted { response } = &mut request
+                let RecordKind::ModelCompleted { response, .. } = &mut request
                     .context
                     .records
                     .last_mut()
@@ -501,7 +504,10 @@ async fn grouped_results_replay_signed_and_redacted_thinking_unchanged()
     let invocation = request.context.records[0].invocation;
     request.context.records.push(Record {
         invocation,
-        kind: RecordKind::ModelCompleted { response: first },
+        kind: RecordKind::ModelCompleted {
+            response: first,
+            shared_context: None,
+        },
     });
     for (cell, code) in ["print(1)", "print(2)"].into_iter().enumerate() {
         request.context.records.push(Record {
@@ -836,7 +842,10 @@ async fn replay_rejects_foreign_provider_missing_feedback_and_wrong_invocation()
         }
         request.context.records.push(Record {
             invocation,
-            kind: RecordKind::ModelCompleted { response },
+            kind: RecordKind::ModelCompleted {
+                response,
+                shared_context: None,
+            },
         });
         if variant >= 2 {
             request.context.records.push(Record {
@@ -1442,6 +1451,7 @@ async fn turn_cancellation_preserves_provenance_and_runtime_notice() -> Result<(
         foreign.context.records.push(Record {
             invocation: InvocationId(invocation.0 + 1),
             kind: RecordKind::ModelCompleted {
+                shared_context: None,
                 response: ModelResponse {
                     action: ModelAction::Final {
                         answer: "foreign".into(),
@@ -1659,16 +1669,20 @@ async fn request_accounting_matches_encoded_media_checkpoint_shared_data_tools_a
         let response = provider
             .respond(request.clone(), CancellationToken::new())
             .await?;
+        let shared_context = request.context.shared_update().cloned();
         request.context.records.push(Record {
             invocation: request.context.records[0].invocation,
-            kind: RecordKind::ModelCompleted { response },
+            kind: RecordKind::ModelCompleted {
+                response,
+                shared_context,
+            },
         });
         let second = provider
             .request_bytes(&request)?
             .ok_or("missing replay accounting")?;
         assert!(second > first, "{kind}");
         let mut invalid = request.clone();
-        let RecordKind::ModelCompleted { response } = &mut invalid
+        let RecordKind::ModelCompleted { response, .. } = &mut invalid
             .context
             .records
             .last_mut()
@@ -1687,7 +1701,7 @@ async fn request_accounting_matches_encoded_media_checkpoint_shared_data_tools_a
             Err(ModelError::Protocol { .. })
         ));
         let mut invalid = request.clone();
-        let RecordKind::ModelCompleted { response } = &mut invalid
+        let RecordKind::ModelCompleted { response, .. } = &mut invalid
             .context
             .records
             .last_mut()
@@ -1770,6 +1784,27 @@ async fn request_accounting_matches_encoded_media_checkpoint_shared_data_tools_a
         assert_eq!(received[2].body, received[3].body, "{kind}");
         let summary: Value = received[1].body_json()?;
         let ordinary: Value = received[4].body_json()?;
+        let initial: Value = received[0].body_json()?;
+        let field = if kind == ProviderKind::OpenAi {
+            "input"
+        } else {
+            "messages"
+        };
+        let prefix = initial[field]
+            .as_array()
+            .ok_or("missing initial messages")?;
+        let replay = ordinary[field]
+            .as_array()
+            .ok_or("missing replay messages")?;
+        assert_eq!(
+            &replay[..prefix.len()],
+            prefix,
+            "{kind}: shared delivery moved"
+        );
+        assert_eq!(
+            replay.len() - prefix.len(),
+            if kind == ProviderKind::OpenAi { 2 } else { 1 }
+        );
         if kind == ProviderKind::OpenAi {
             for field in [
                 "instructions",

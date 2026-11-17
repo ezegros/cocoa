@@ -1251,6 +1251,7 @@ impl Engine {
             operations.check().await?;
             observations.emit(EventKind::ModelStarted { round });
             round = round.saturating_add(1);
+            let shared_context = request.context.shared_update().cloned();
             let response = self
                 .respond(request, cancellation.child_token(), recovery)
                 .await
@@ -1265,7 +1266,10 @@ impl Engine {
             operations.check().await?;
             let record = Record {
                 invocation,
-                kind: RecordKind::ModelCompleted { response },
+                kind: RecordKind::ModelCompleted {
+                    response,
+                    shared_context,
+                },
             };
             if encoded_size(&record)? > limits.record_bytes {
                 return Err(StoreError::RecordLimit.into());
@@ -1278,7 +1282,7 @@ impl Engine {
             if let Some(state) = &instruction_state {
                 self.adapters.context.restore(state).await?;
             }
-            let RecordKind::ModelCompleted { response } = record.kind else {
+            let RecordKind::ModelCompleted { response, .. } = record.kind else {
                 unreachable!("model acceptance constructs only ModelCompleted records");
             };
             observations.emit(EventKind::ModelFinished {
@@ -1503,7 +1507,7 @@ impl Engine {
                 continue;
             }
             match &stored.record.kind {
-                RecordKind::ModelCompleted { response } => {
+                RecordKind::ModelCompleted { response, .. } => {
                     if let ModelAction::Execute { cells } = &response.action {
                         for (ordinal, cell) in cells.iter().enumerate() {
                             let ordinal =
@@ -1693,7 +1697,7 @@ fn compaction_boundary(
     let mut cuts = Vec::new();
     for (index, stored) in records.iter().enumerate() {
         match &stored.record.kind {
-            RecordKind::ModelCompleted { response } => {
+            RecordKind::ModelCompleted { response, .. } => {
                 if pending != 0 {
                     return Err(CheckpointError::Boundary);
                 }
@@ -1944,7 +1948,7 @@ fn validate_history(
         }
         match &record.kind {
             RecordKind::InputAccepted { .. } => final_response = false,
-            RecordKind::ModelCompleted { response } => {
+            RecordKind::ModelCompleted { response, .. } => {
                 if !cells.is_empty() {
                     return Err(ResumeError::InvalidHistory);
                 }

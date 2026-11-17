@@ -587,16 +587,118 @@ async fn prompt_selection_preserves_constraints_and_exact_budgets_without_restri
             .map(Vec::len),
         Some(3)
     );
+    let mut partial_history = records.clone();
+    partial_history.push(Record {
+        invocation: InvocationId(17),
+        kind: RecordKind::ModelCompleted {
+            response: ModelResponse {
+                action: ModelAction::Final {
+                    answer: "reviewed selection".into(),
+                },
+                continuation: None,
+                usage: None,
+            },
+            shared_context: selected.shared.clone(),
+        },
+    });
+    let partial_bytes = serde_json::to_vec(&partial_history)?.len() + 2;
+    for bytes in [
+        partial_bytes,
+        partial_bytes + serde_json::to_vec(&required)?.len(),
+    ] {
+        let retained = assembler
+            .assemble(partial_history.clone(), Vec::new(), bytes)
+            .await?;
+        assert_eq!(retained.shared, selected.shared);
+        assert!(retained.shared_update().is_none());
+        assert_eq!(retained.encoded_size()?, partial_bytes);
+    }
+    let expanded = assembler
+        .assemble(partial_history.clone(), Vec::new(), 1024 * 1024)
+        .await?;
+    assert_eq!(
+        expanded
+            .shared_update()
+            .ok_or("missing expanded snapshot")?
+            .omitted,
+        0
+    );
     set(&host, "a", json!({"type":"decision","value":"new"})).await?;
+    assert!(matches!(
+        assembler
+            .assemble(partial_history.clone(), Vec::new(), partial_bytes)
+            .await,
+        Err(ContextError::Limit)
+    ));
     let refreshed = assembler
         .assemble(records.clone(), Vec::new(), 1024 * 1024)
         .await?;
+    let mut delivered = records.clone();
+    delivered.push(Record {
+        invocation: InvocationId(17),
+        kind: RecordKind::ModelCompleted {
+            response: ModelResponse {
+                action: ModelAction::Final {
+                    answer: "reviewed".into(),
+                },
+                continuation: None,
+                usage: None,
+            },
+            shared_context: refreshed.shared.clone(),
+        },
+    });
+    let history_bytes = serde_json::to_vec(&delivered)?.len() + 2;
+    let unchanged = assembler
+        .assemble(delivered, Vec::new(), history_bytes)
+        .await?;
+    assert!(unchanged.shared_update().is_none());
+    assert_eq!(unchanged.encoded_size()?, history_bytes);
     let shared = serde_json::to_value(refreshed.shared)?;
     assert_eq!(shared["records"][1]["value"], "new");
     assert_eq!(shared["records"][1]["labels"], json!([]));
     assert_eq!(shared["omitted"], 0);
     assert_eq!(serde_json::to_value(selected.shared)?, expected);
     let other = session()?;
+    let reset = other
+        .manager
+        .bind_context(Arc::new(BoundedContext))
+        .prepare(
+            stored_records(partial_history.clone())?,
+            Vec::new(),
+            1024 * 1024,
+        )
+        .await?
+        .context;
+    assert_eq!(
+        serde_json::to_value(reset.shared_update())?,
+        json!({
+            "authority":"agent_authored", "records":[], "omitted":0
+        })
+    );
+    assert_eq!(reset.records, partial_history);
+    assert_eq!(get(&other.host, "z").await?, Value::Null);
+    partial_history.push(Record {
+        invocation: InvocationId(18),
+        kind: RecordKind::ModelCompleted {
+            response: ModelResponse {
+                action: ModelAction::Final {
+                    answer: "reset observed".into(),
+                },
+                continuation: None,
+                usage: None,
+            },
+            shared_context: reset.shared,
+        },
+    });
+    let reset_bytes = serde_json::to_vec(&partial_history)?.len() + 2;
+    let retained_reset = other
+        .manager
+        .bind_context(Arc::new(BoundedContext))
+        .prepare(stored_records(partial_history)?, Vec::new(), reset_bytes)
+        .await?
+        .context;
+    assert!(retained_reset.shared_update().is_none());
+    assert_eq!(retained_reset.encoded_size()?, reset_bytes);
     assert!(
         other
             .manager

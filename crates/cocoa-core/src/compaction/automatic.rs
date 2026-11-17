@@ -230,6 +230,12 @@ impl SummaryAttempt {
                     source: *aliases.get(&stored.id).ok_or(CheckpointError::Source)?,
                     invocation: stored.record.invocation,
                     kind: PortableKind::try_from(&stored.record.kind)?,
+                    shared_context: match &stored.record.kind {
+                        RecordKind::ModelCompleted { shared_context, .. } => {
+                            shared_context.as_ref()
+                        }
+                        _ => None,
+                    },
                 });
             }
         }
@@ -294,6 +300,8 @@ struct PortableSource<'a> {
     invocation: crate::store::InvocationId,
     #[serde(flatten)]
     kind: PortableKind<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shared_context: Option<&'a crate::context::SharedContext>,
 }
 
 #[derive(Serialize)]
@@ -340,7 +348,7 @@ impl<'a> TryFrom<&'a RecordKind> for PortableKind<'a> {
                 retained_images: u64::try_from(input.images().len())
                     .map_err(|_| CheckpointError::Limits)?,
             },
-            RecordKind::ModelCompleted { response } => match &response.action {
+            RecordKind::ModelCompleted { response, .. } => match &response.action {
                 ModelAction::Final { answer } => Self::Assistant { text: answer },
                 ModelAction::Execute { cells } => Self::Code { cells },
             },

@@ -357,7 +357,7 @@ async fn roots(
                 let record = payload.decode(metadata.bytes)?;
                 let candidate = match &record {
                     RecordKind::InputAccepted { input } => Some((input.text(), SearchSource::User)),
-                    RecordKind::ModelCompleted { response } => match &response.action {
+                    RecordKind::ModelCompleted { response, .. } => match &response.action {
                         ModelAction::Final { answer } => {
                             Some((answer.as_str(), SearchSource::Assistant))
                         }

@@ -80,6 +80,7 @@ async fn exact_text_preserves_full_width_ids_and_images_stay_out_of_text()
             &Record {
                 invocation: original.invocation,
                 kind: RecordKind::ModelCompleted {
+                    shared_context: None,
                     response: ModelResponse {
                         action: ModelAction::Final {
                             answer: "visible assistant evidence".into(),

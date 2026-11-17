@@ -3757,7 +3757,8 @@ async fn automatic_compaction_preserves_live_closures_effects_and_carried_work_t
                         response: ModelResponse {
                             action: ModelAction::Execute { .. },
                             ..
-                        }
+                        },
+                        ..
                     }
                 ))
                 .count(),
@@ -3765,7 +3766,7 @@ async fn automatic_compaction_preserves_live_closures_effects_and_carried_work_t
         );
         assert!(!request.context.records.iter().any(|record| matches!(
             &record.kind,
-            RecordKind::ModelCompleted { response: ModelResponse { action: ModelAction::Execute { cells }, .. } }
+            RecordKind::ModelCompleted { response: ModelResponse { action: ModelAction::Execute { cells }, .. }, .. }
                 if cells.iter().any(|cell| cell.code.contains("var retained"))
         )));
         let checkpoint = request

@@ -81,6 +81,7 @@ async fn run_export_preserves_durable_coverage_failures_and_sanitizes_private_pa
             &Record {
                 invocation: InvocationId(1),
                 kind: RecordKind::ModelCompleted {
+                    shared_context: None,
                     response: ModelResponse {
                         action: ModelAction::Final {
                             answer: "public answer".into(),
@@ -266,7 +267,7 @@ async fn run_export_preserves_durable_coverage_failures_and_sanitizes_private_pa
         encoded
     );
     assert!(
-        matches!(root.read_record(model, 65536).await?.map(|record| record.record.kind), Some(RecordKind::ModelCompleted { response }) if response.continuation == Some(private))
+        matches!(root.read_record(model, 65536).await?.map(|record| record.record.kind), Some(RecordKind::ModelCompleted { response, .. }) if response.continuation == Some(private))
     );
     Ok(())
 }
@@ -303,11 +304,17 @@ async fn conversation_forks_remap_originals_and_survive_reopen_without_future_st
         scoped_feedback: Vec::new(),
         skill_feedback: Vec::new(),
     };
+    let shared: cocoa_core::context::SharedContext = serde_json::from_value(json!({
+        "authority":"agent_authored",
+        "records":[{"key":"review","type":"observation","value":"historical finding","labels":[],"owner":i64::from(source.root_agent()).to_string()}],
+        "omitted":0,
+    }))?;
     let model_id = store
         .append(
             &Record {
                 invocation: InvocationId(1),
                 kind: RecordKind::ModelCompleted {
+                    shared_context: Some(shared),
                     response: ModelResponse {
                         action: ModelAction::Execute {
                             cells: vec![Cell {
@@ -401,6 +408,15 @@ async fn conversation_forks_remap_originals_and_survive_reopen_without_future_st
     assert!(history.checkpoints.is_empty());
     let new_model = history.records[1].id;
     assert_ne!(new_model, model_id);
+    assert_eq!(
+        history.records[1].record.kind,
+        store
+            .read_record(model_id, 64 * 1024)
+            .await?
+            .ok_or("missing source response")?
+            .record
+            .kind
+    );
     assert_ne!(history.records[0].id, first);
     assert!(
         matches!(history.records[2].record.kind, RecordKind::CellStarted { model, .. } if model == new_model)
@@ -1452,6 +1468,11 @@ async fn exact_history_and_typed_state_survive_reopening() -> Result<(), Box<dyn
     let completed = Record {
         invocation: InvocationId(1),
         kind: RecordKind::ModelCompleted {
+            shared_context: Some(serde_json::from_value(json!({
+                "authority":"agent_authored",
+                "records":[{"key":"review","type":"observation","value":{"text":"Keep 🦀 and quotes \""},"labels":["review"],"owner":"2"}],
+                "omitted":3,
+            }))?),
             response: ModelResponse {
                 action: ModelAction::Execute {
                     cells: vec![Cell {
@@ -2842,6 +2863,7 @@ async fn lost_local_acknowledgements_recover_exact_receipts_and_unknown_external
     let model = Record {
         invocation: InvocationId(1),
         kind: RecordKind::ModelCompleted {
+            shared_context: None,
             response: ModelResponse {
                 action: ModelAction::Execute {
                     cells: vec![
@@ -3162,6 +3184,7 @@ async fn literal_search_checks_complete_root_messages_controls_and_order()
             &Record {
                 invocation: InvocationId(5),
                 kind: RecordKind::ModelCompleted {
+                    shared_context: None,
                     response: ModelResponse {
                         action: ModelAction::Final {
                             answer: "visible large continuation answer".into(),
@@ -3520,6 +3543,7 @@ fn model() -> Record {
     Record {
         invocation: InvocationId(1),
         kind: RecordKind::ModelCompleted {
+            shared_context: None,
             response: ModelResponse {
                 action: ModelAction::Final {
                     answer: "complete".into(),

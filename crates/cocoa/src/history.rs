@@ -543,7 +543,7 @@ fn render(stored: &StoredRecord) -> Result<String, CapabilityError> {
     let encoding = || rejected("storage", "Historical text could not be encoded");
     let text = match &stored.record.kind {
         RecordKind::InputAccepted { input } => input.text().to_owned(),
-        RecordKind::ModelCompleted { response } => match &response.action {
+        RecordKind::ModelCompleted { response, .. } => match &response.action {
             ModelAction::Final { answer } => answer.clone(),
             ModelAction::Execute { cells } => {
                 let mut text = String::new();

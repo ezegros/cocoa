@@ -448,6 +448,7 @@ async fn bounded_reads_keep_latest_cache_but_never_claim_a_partial_total()
     let response = Record {
         invocation: InvocationId(1),
         kind: RecordKind::ModelCompleted {
+            shared_context: None,
             response: cocoa_core::model::ModelResponse {
                 action: cocoa_core::model::ModelAction::Final {
                     answer: "legacy".into(),

@@ -798,7 +798,7 @@ impl Originals<'_> {
                 .ok_or(CheckpointError::Source)?;
             let text = match (&record.record.kind, author) {
                 (RecordKind::InputAccepted { input }, QuotationAuthor::User) => input.text(),
-                (RecordKind::ModelCompleted { response }, QuotationAuthor::Assistant) => {
+                (RecordKind::ModelCompleted { response, .. }, QuotationAuthor::Assistant) => {
                     let ModelAction::Final { answer } = &response.action else {
                         return Err(CheckpointError::Source);
                     };
@@ -947,7 +947,7 @@ fn boundary(records: &[StoredRecord], through: RecordId) -> Result<usize, Checkp
     let mut pending = BTreeSet::new();
     for record in &records[..=cut] {
         match &record.record.kind {
-            RecordKind::ModelCompleted { response } => {
+            RecordKind::ModelCompleted { response, .. } => {
                 if !pending.is_empty() {
                     return Err(CheckpointError::Boundary);
                 }

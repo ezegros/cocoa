@@ -69,7 +69,7 @@ pub struct InstructionFeedback {
 
 /// Current session knowledge, distinct from chronological conversation evidence.
 /// Every session participant may read it; only its owner may replace its content.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContextRecord {
     pub key: String,
     #[serde(flatten)]
@@ -100,9 +100,9 @@ pub enum ContextType {
     Hypothesis,
 }
 
-/// A current shared-data snapshot, not trusted instructions or conversation history.
+/// An agent-authored shared-data snapshot, not trusted instructions.
 /// Omitted records remain readable through the session's context capabilities.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "authority", rename = "agent_authored")]
 pub struct SharedContext {
     pub records: Vec<ContextRecord>,
@@ -122,12 +122,34 @@ pub struct Context {
     /// Application-owned notes appended to execution feedback during projection.
     /// The assembler must budget these and retain them while their records remain.
     pub feedback_notes: Vec<FeedbackNote>,
-    /// Agent-authored session data, projected separately from trusted instructions.
-    /// The assembler must budget the complete snapshot, including omission metadata.
+    /// Current agent-authored session data. Only a changed snapshot is delivered;
+    /// accepted snapshots remain in history before the response that consumed them.
     pub shared: Option<SharedContext>,
 }
 
 impl Context {
+    /// Return the current snapshot only when it differs from the last retained
+    /// delivery. After compaction removes that delivery, send the snapshot again.
+    #[must_use]
+    pub fn shared_update(&self) -> Option<&SharedContext> {
+        let current = self.shared.as_ref()?;
+        (self.shared_delivered() != Some(current)).then_some(current)
+    }
+
+    /// Return the most recent shared snapshot still retained in history.
+    #[must_use]
+    pub fn shared_delivered(&self) -> Option<&SharedContext> {
+        self.records
+            .iter()
+            .rev()
+            .find_map(|record| match &record.kind {
+                crate::store::RecordKind::ModelCompleted { shared_context, .. } => {
+                    shared_context.as_ref()
+                }
+                _ => None,
+            })
+    }
+
     /// Sum the encoded component sizes used by context assemblers. Empty auxiliary
     /// instructions and notes, and an absent shared snapshot, consume no allowance.
     /// Provider request framing has its own transport byte limit.
@@ -143,7 +165,7 @@ impl Context {
         if !self.feedback_notes.is_empty() {
             bytes = bytes.saturating_add(encoded_size(&self.feedback_notes)?);
         }
-        if let Some(shared) = &self.shared {
+        if let Some(shared) = self.shared_update() {
             bytes = bytes.saturating_add(encoded_size(shared)?);
         }
         if let Some(checkpoint) = &self.checkpoint {

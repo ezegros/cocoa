@@ -140,7 +140,13 @@ impl Responses<'_> {
                         input.push(json!({"role":"user","content":parts}));
                     }
                 }
-                RecordKind::ModelCompleted { response } if pending.is_empty() => {
+                RecordKind::ModelCompleted {
+                    response,
+                    shared_context,
+                } if pending.is_empty() => {
+                    if let Some(shared) = crate::shared_context(shared_context.as_ref())? {
+                        input.push(json!({"role":"user","content":shared}));
+                    }
                     let continuation = response
                         .continuation
                         .as_ref()
@@ -212,7 +218,7 @@ impl Responses<'_> {
         if !pending.is_empty() {
             return Err(protocol("missing cell feedback"));
         }
-        if let Some(shared) = crate::shared_context(request)? {
+        if let Some(shared) = crate::shared_context(request.context.shared_update())? {
             input.push(json!({"role":"user","content":shared}));
         }
         self.encode_input(

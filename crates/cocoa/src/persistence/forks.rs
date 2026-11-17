@@ -51,8 +51,11 @@ impl SessionAttachment {
 
     /// Atomically create an independent session before a root accepted input.
     /// Retain the working directory and current configuration, not workspace state.
-    /// Copy only canonical root originals with fresh identities. Children, shared
-    /// context, checkpoints and instruction delivery are intentionally absent.
+    /// Copy only canonical root originals with fresh identities, including shared
+    /// snapshots already delivered. Live shared records, children, checkpoints
+    /// and instruction delivery are intentionally absent. The session context
+    /// assembler delivers an empty snapshot to distinguish the reset live state
+    /// from retained historical snapshots.
     /// Dropping this future after creation is admitted does not cancel the commit.
     ///
     /// # Errors
