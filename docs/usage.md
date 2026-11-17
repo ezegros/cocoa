@@ -25,8 +25,8 @@ An alias can try choices marked `fallback_only: true` at startup if credentials 
 | Input | Action |
 | --- | --- |
 | Enter | Send the draft |
-| Ctrl+J | Insert a newline |
 | Ctrl+Enter | Insert a newline when the terminal forwards it |
+| Ctrl+J | Insert a newline if Ctrl+Enter is unavailable |
 | `@` at the start of a word | Find a file or directory |
 | `$` | Find a skill and insert `$skill-name` |
 | `/` | Browse [slash commands](slash-commands.md) |

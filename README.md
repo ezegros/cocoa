@@ -35,7 +35,7 @@ Follow setup to connect a provider and select a model. Then describe the work, o
 cocoa "Explain how this project is organized"
 ```
 
-Press Enter to send, Ctrl+J for a new line, or Esc twice to stop a turn. Type `/` to browse commands, `@` to reference a file, or `$` to choose a skill. Continue the most recent conversation with `cocoa resume --last`.
+Press Enter to send, Ctrl+Enter for a new line, or Esc twice to stop a turn. If your terminal does not forward Ctrl+Enter, use Ctrl+J for a new line. Type `/` to browse commands, `@` to reference a file, or `$` to choose a skill. Continue the most recent conversation with `cocoa resume --last`.
 
 For automation after configuring a model and credentials, use `cocoa exec "INSTRUCTION"` or pipe text to `cocoa exec`. It runs once without a terminal and prints a JSON outcome after cleanup. See [one-shot execution](docs/cli.md#one-shot-execution) for the contract. A successful exit means execution completed, not that the task was solved correctly.
 
