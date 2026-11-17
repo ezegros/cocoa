@@ -1510,7 +1510,7 @@ impl Chat {
                     && matches!(self.progress, Progress::Streaming | Progress::Thinking)
                     && let Some(tokens_per_second) = self.stream_tokens_per_second
                 {
-                    let speed = format!("· ~{tokens_per_second:.0} tok/s ");
+                    let speed = format!("· ~{tokens_per_second:.0}tps ");
                     if title.width() + speed.len() + timing.len() + self.alias.len() + 6
                         <= usize::from(area.width)
                     {
@@ -1533,7 +1533,7 @@ impl Chat {
                 }
             }
             for suffix in [
-                self.cache_hit_rate.map(|rate| format!(" · {rate:.0}%")),
+                self.cache_hit_rate.map(|rate| format!(" · C{rate:.0}%")),
                 self.cost_usd.map(|cost| format!(" · ~${cost:.2}")),
             ]
             .into_iter()

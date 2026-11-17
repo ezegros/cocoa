@@ -67,7 +67,7 @@ A rejected tool call is feedback for the model to correct, not an agent failure.
 
 ## Read and copy results
 
-The percentage in the composer border is the latest root-agent request's cached-input percentage, not the session average. An unknown cache count is hidden. When available, the approximate dollar amount covers the session's recorded requests, including child agents and compaction.
+The `C` percentage in the composer border is the latest root-agent request's cached-input percentage, not the session average. An unknown cache count is hidden. When available, the approximate dollar amount covers the session's recorded requests, including child agents and compaction.
 
 Scroll with the mouse wheel or PageUp/PageDown. Click an activity header to expand tool details. Tab moves into activity navigation; arrows select or expand rows, Enter or Space toggles them, and Esc returns to the draft.
 

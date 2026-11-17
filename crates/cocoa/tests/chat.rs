@@ -4666,9 +4666,9 @@ fn stream_rate_holds_between_samples_and_resets_for_each_model() -> Result<(), B
         },
     );
     chat.tick(Duration::from_millis(1999));
-    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    assert!(!render(&mut chat, 100, 16)?.contains("tps"));
     chat.tick(Duration::from_millis(1));
-    assert!(render(&mut chat, 100, 16)?.contains("~50 tok/s"));
+    assert!(render(&mut chat, 100, 16)?.contains("~50tps"));
     observe_root_event(
         &mut chat,
         EventKind::AssistantText {
@@ -4676,16 +4676,16 @@ fn stream_rate_holds_between_samples_and_resets_for_each_model() -> Result<(), B
             truncated: false,
         },
     );
-    assert!(render(&mut chat, 100, 16)?.contains("~50 tok/s"));
+    assert!(render(&mut chat, 100, 16)?.contains("~50tps"));
     chat.tick(Duration::from_millis(1999));
-    assert!(render(&mut chat, 100, 16)?.contains("~50 tok/s"));
+    assert!(render(&mut chat, 100, 16)?.contains("~50tps"));
     chat.tick(Duration::from_millis(1));
-    assert!(render(&mut chat, 100, 16)?.contains("~75 tok/s"));
+    assert!(render(&mut chat, 100, 16)?.contains("~75tps"));
     observe_root_event(&mut chat, EventKind::ModelFinished { executing: true });
-    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    assert!(!render(&mut chat, 100, 16)?.contains("tps"));
     observe_root_event(&mut chat, EventKind::ModelStarted { round: 1 });
     chat.tick(Duration::from_secs(5));
-    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    assert!(!render(&mut chat, 100, 16)?.contains("tps"));
     observe_root_event(
         &mut chat,
         EventKind::AssistantText {
@@ -4694,9 +4694,9 @@ fn stream_rate_holds_between_samples_and_resets_for_each_model() -> Result<(), B
         },
     );
     chat.tick(Duration::from_secs(3));
-    assert!(render(&mut chat, 100, 16)?.contains("~7 tok/s"));
+    assert!(render(&mut chat, 100, 16)?.contains("~7tps"));
     observe_root_event(&mut chat, EventKind::ModelFinished { executing: false });
-    assert!(!render(&mut chat, 100, 16)?.contains("tok/s"));
+    assert!(!render(&mut chat, 100, 16)?.contains("tps"));
     Ok(())
 }
 
@@ -4722,8 +4722,8 @@ fn composer_stats_stay_on_the_border_and_keep_completed_time() -> Result<(), Box
         .lines()
         .find(|line| line.starts_with('╭'))
         .ok_or("missing top border")?;
-    assert!(top.contains("~66 tok/s · 2s"), "{view}");
-    assert!(top.contains("sonnet high · 88% · ~$0.84"), "{view}");
+    assert!(top.contains("~66tps · 2s"), "{view}");
+    assert!(top.contains("sonnet high · C88% · ~$0.84"), "{view}");
     let bottom = view.lines().last().ok_or("missing bottom border")?;
     assert!(
         bottom.ends_with(" ~/work/cocoa · feat/input +32 -10 ╯"),
@@ -4734,7 +4734,7 @@ fn composer_stats_stay_on_the_border_and_keep_completed_time() -> Result<(), Box
     chat.tick(Duration::from_secs(30));
     let ready = render(&mut chat, 100, 16)?;
     assert!(ready.contains("Ready · 2s"), "{ready}");
-    assert!(!ready.contains("tok/s"), "{ready}");
+    assert!(!ready.contains("tps"), "{ready}");
     let narrow_ready = render(&mut chat, 18, 16)?;
     let top = narrow_ready
         .lines()
@@ -4743,13 +4743,13 @@ fn composer_stats_stay_on_the_border_and_keep_completed_time() -> Result<(), Box
     assert!(top.contains("sonnet high"), "{narrow_ready}");
     chat.set_usage(Some(88.0), None);
     let subscription = render(&mut chat, 100, 16)?;
-    assert!(subscription.contains("sonnet high · 88%"), "{subscription}");
+    assert!(subscription.contains("sonnet high · C88%"), "{subscription}");
     assert!(!subscription.contains('$'), "{subscription}");
     chat.initial_prompt("next")?;
     chat.tick(Duration::from_secs(1));
     let next = render(&mut chat, 100, 16)?;
     assert!(next.contains("· 1s"), "{next}");
-    assert!(!next.contains("tok/s"), "{next}");
+    assert!(!next.contains("tps"), "{next}");
     Ok(())
 }
 

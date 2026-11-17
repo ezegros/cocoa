@@ -863,12 +863,12 @@ fn fast_stream_remains_complete_before_provider_settlement() -> io::Result<()> {
         assert!(screen.contains(&line), "missing {line:?}:\n{screen}");
     }
     assert!(!session.states()?.contains(&"done".to_owned()));
-    session.wait_text("tok/s")?;
+    session.wait_text("tps")?;
     session.wait_text("feat/composer +2 -1")?;
     capture_session_view(&mut session, "composer-stats-streaming")?;
     server.events.cycle_release.store(true, Ordering::SeqCst);
     session.wait_text("settled-answer")?;
-    session.wait_text("88%")?;
+    session.wait_text("C88%")?;
     let ready = session.screen();
     let title = ready
         .lines()
@@ -878,11 +878,11 @@ fn fast_stream_remains_complete_before_provider_settlement() -> io::Result<()> {
         title.contains("Ready · ") && title.contains("s "),
         "{ready}"
     );
-    assert!(title.contains("fixture-model high · 88%"), "{ready}");
-    assert!(!title.contains("tok/s") && !title.contains('$'), "{ready}");
+    assert!(title.contains("fixture-model high · C88%"), "{ready}");
+    assert!(!title.contains("tps") && !title.contains('$'), "{ready}");
     capture_session_view(&mut session, "composer-stats-ready")?;
     session.resize(52, 16)?;
-    session.wait_text("88%")?;
+    session.wait_text("C88%")?;
     capture_session_view(&mut session, "composer-stats-narrow")?;
     session.command(":q")?;
     session.finish(0)?;
