@@ -62,9 +62,12 @@ pub enum Efforts {
     ModelsDev(Vec<ThinkingLevel>),
 }
 
-/// Discovered models and provider profiles whose catalogues could not be read.
+/// Discovered models, configured provider profiles, and unavailable catalogues.
 pub struct Catalogue {
     pub models: Vec<Model>,
+    /// Configured profiles with any required credentials resolved,
+    /// even when model discovery fails.
+    pub connected: Vec<ProviderKind>,
     pub unavailable: Vec<ProviderKind>,
 }
 
@@ -315,6 +318,7 @@ impl LimitDiscovery {
                     groups.push(Self {
                         provider: alias.clone(),
                         catalogue: Catalogue {
+                            connected: vec![alias.kind],
                             models: Vec::new(),
                             unavailable: Vec::new(),
                         },
@@ -381,6 +385,7 @@ impl LimitDiscovery {
 pub async fn discover() -> Catalogue {
     let mut jobs = tokio::task::JoinSet::new();
     let mut catalogue = Catalogue {
+        connected: Vec::new(),
         models: Vec::new(),
         unavailable: Vec::new(),
     };
@@ -394,7 +399,12 @@ pub async fn discover() -> Catalogue {
     let mut saved_models = Vec::new();
     for kind in PROVIDERS {
         let provider = match tokio::task::spawn_blocking(move || {
-            crate::config::catalogue_provider(kind)
+            crate::config::catalogue_provider(kind)?
+                .map(|mut provider| {
+                    provider.api_key = provider.resolve_api_key()?;
+                    Ok::<_, crate::config::ConfigError>(provider)
+                })
+                .transpose()
         })
         .await
         {
@@ -407,6 +417,7 @@ pub async fn discover() -> Catalogue {
         };
         match provider {
             Ok(Some(provider)) => {
+                catalogue.connected.push(kind);
                 if provider.endpoint == kind.endpoint_default() && kind != ProviderKind::ChatGpt {
                     for alias in aliases
                         .values()
@@ -497,6 +508,7 @@ pub async fn connect(provider: crate::config::ResolvedAlias) -> Result<Catalogue
     let kind = provider.kind;
     let models = discover_provider_checked(provider).await?;
     let mut catalogue = Catalogue {
+        connected: vec![kind],
         models,
         unavailable: Vec::new(),
     };

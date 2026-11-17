@@ -1468,12 +1468,31 @@ fn commands_stay_local_and_preserve_history_model_edits_and_onboarding() -> io::
     assert!(requests[1].body.to_string().contains("second prompt"));
 
     let home = root.command_home("onboarding", &server.endpoint, false, None)?;
+    let auth_path = home.join(".config/cocoa/auth.json");
+    fs::write(
+        &auth_path,
+        serde_json::to_vec(
+            &json!({"openai":{"type":"api-key","api_key":"initial-onboarding-key"}}),
+        )?,
+    )?;
+    fs::set_permissions(&auth_path, fs::Permissions::from_mode(0o600))?;
     let mut onboarding = Terminal::spawn(&home, &["aliases"], 90, 28, None)?;
     onboarding.until(|session| has_bytes(&session.transcript, b"+ Add alias"))?;
     assert_report(&onboarding, "blocked", Some("question"))?;
     onboarding.key(b"\r")?;
     onboarding.command("fresh")?;
+    onboarding.wait_text("+ Enter model ID")?;
+    let screen = onboarding.screen();
+    let provider_index = screen
+        .lines()
+        .filter(|line| line.contains("+ Enter model ID"))
+        .position(|line| line.contains("openai"))
+        .ok_or_else(|| io::Error::other(format!("missing openai manual entry: {screen}")))?;
+    for _ in 0..provider_index {
+        onboarding.key(b"\x1b[B")?;
+    }
     onboarding.key(b"\r")?;
+    onboarding.wait_text("Model ID · openai")?;
     onboarding.command("onboarding-model")?;
     onboarding.key(b"\r\r")?;
     until_result(&mut onboarding, |session| {
@@ -1483,7 +1502,9 @@ fn commands_stay_local_and_preserve_history_model_edits_and_onboarding() -> io::
     onboarding.key(b"\x1b")?;
     onboarding.command("/login openai")?;
     onboarding.command("onboarding-private-sentinel")?;
-    onboarding.until(|session| session.home.join(".config/cocoa/auth.json").exists())?;
+    until_result(&mut onboarding, |_| {
+        Ok(read_json(&auth_path)?["openai"]["api_key"] == "onboarding-private-sentinel")
+    })?;
     onboarding.until(|session| {
         session
             .screen()
@@ -1574,6 +1595,92 @@ fn model_commands_pick_catalogue_and_manual_models_without_saving() -> io::Resul
     }
     assert!(requests[1].body.to_string().contains("first model prompt"));
     assert_eq!(fs::read(&path)?, before);
+    close_command_session(&mut session)?;
+    server.finish()
+}
+
+#[test]
+fn model_picker_manual_entries_only_offer_connected_providers_and_select_their_provider()
+-> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home("connected-manual-models", &server.endpoint, true, None)?;
+    let path = home.join(".config/cocoa/config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    config["providers"]
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("missing providers"))?
+        .remove("ollama");
+    config["providers"]["baseten"]["credential_env"] = json!("COCOA_TEST_KEY");
+    fs::write(&path, serde_json::to_vec(&config)?)?;
+    let before = fs::read(&path)?;
+    let mut session = Terminal::spawn(&home, &[], 100, 32, None)?;
+    session.wait_text(" medium ")?;
+    session.command("/model")?;
+    session.wait_text("Select model")?;
+    session.text("manual-only-sentinel")?;
+    session.wait_text("+ Enter model ID")?;
+    let screen = session.screen();
+    let rows: Vec<_> = screen
+        .lines()
+        .filter(|line| line.contains("+ Enter model ID"))
+        .collect();
+    assert_eq!(rows.len(), 2, "{screen}");
+    assert!(rows.iter().any(|line| line.contains("openai")), "{screen}");
+    let index = rows
+        .iter()
+        .position(|line| line.contains("baseten"))
+        .ok_or_else(|| io::Error::other(format!("missing baseten manual entry: {screen}")))?;
+    for _ in 0..index {
+        session.key(b"\x1b[B")?;
+    }
+    session.key(b"\r")?;
+    session.wait_text("Model ID · baseten")?;
+    session.command("connected-manual-model")?;
+    session.wait_text("connected-manual-model › Thinking")?;
+    session.key(b"\r")?;
+    session.until(|session| !session.screen().contains("Select model"))?;
+    session.command("selected provider prompt")?;
+    session.wait_text("answer-1")?;
+    let requests = server.requests()?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["model"], "connected-manual-model");
+    assert_eq!(requests[0].authorization, "Bearer fixture-key");
+    assert_eq!(fs::read(&path)?, before);
+    close_command_session(&mut session)?;
+    server.finish()
+}
+
+#[test]
+fn model_picker_offers_declared_local_provider_without_credentials() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home("local-manual-model", &server.endpoint, false, None)?;
+    let path = home.join(".config/cocoa/config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path)?)?;
+    config["aliases"] =
+        json!({"medium":[{"provider":"ollama","model":"local-model","priority":0}]});
+    config["default_alias"] = json!("medium");
+    fs::write(&path, serde_json::to_vec(&config)?)?;
+    let mut session = Terminal::spawn(&home, &[], 100, 32, None)?;
+    session.wait_text(" medium ")?;
+    session.command("/model")?;
+    session.wait_text("Select model")?;
+    session.text("manual-only-sentinel")?;
+    session.wait_text("+ Enter model ID")?;
+    let screen = session.screen();
+    let rows: Vec<_> = screen
+        .lines()
+        .filter(|line| line.contains("+ Enter model ID"))
+        .collect();
+    assert_eq!(rows.len(), 1, "{screen}");
+    assert!(rows[0].contains("ollama"), "{screen}");
+    session.key(b"\r")?;
+    session.wait_text("Model ID · ollama")?;
+    assert!(server.requests()?.is_empty());
+    assert!(!home.join(".config/cocoa/auth.json").exists());
+    session.key(b"\x1b")?;
+    session.key(b"\x1b")?;
     close_command_session(&mut session)?;
     server.finish()
 }

@@ -485,6 +485,7 @@ pub(crate) struct Dialog {
     editing_alias: String,
     editing_entry: Option<usize>,
     models: Vec<Model>,
+    connected_providers: Vec<ProviderKind>,
     thinking_choices: BTreeMap<String, Option<ThinkingLevel>>,
     alias_choices: BTreeMap<String, usize>,
     accounts: Vec<cocoa_oauth::Account>,
@@ -676,6 +677,7 @@ impl Dialog {
     pub fn catalogue(&mut self, catalogue: Catalogue) {
         let thinking = self.levels().get(self.selected).copied();
         self.models = catalogue.models;
+        self.connected_providers = catalogue.connected;
         if let Page::Thinking { model, .. } = &mut self.page
             && let Some(discovered) = self.models.iter().find(|discovered| {
                 discovered.provider == model.provider && discovered.id == model.id
@@ -1547,6 +1549,7 @@ impl Dialog {
             editing_alias: String::new(),
             editing_entry: None,
             models: Vec::new(),
+            connected_providers: Vec::new(),
             thinking_choices: BTreeMap::new(),
             alias_choices: BTreeMap::new(),
             accounts: Vec::new(),
@@ -1914,7 +1917,9 @@ impl Dialog {
                 let choices = self.model_choices();
                 if let Some(selection) = self.model_selection() {
                     return self.select_model(target.clone(), selection.model, selection.thinking);
-                } else if let Some(provider) = PROVIDERS.get(selected.saturating_sub(choices.len()))
+                } else if let Some(provider) = self
+                    .connected_providers
+                    .get(selected.saturating_sub(choices.len()))
                 {
                     self.page = Page::Manual {
                         target: target.clone(),
@@ -2486,7 +2491,9 @@ impl Dialog {
                     })
                     .collect();
                 rows.extend(
-                    PROVIDERS.map(|provider| ("+ Enter model ID".into(), provider.to_string())),
+                    self.connected_providers
+                        .iter()
+                        .map(|provider| ("+ Enter model ID".into(), provider.to_string())),
                 );
                 rows
             }
