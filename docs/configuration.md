@@ -48,7 +48,9 @@ Alias names use 1 through 64 ASCII letters, digits, underscores or hyphens. Ther
 
 Omit `effort` to use the provider default. Supported values depend on the [provider and model](providers.md#thinking-and-model-restrictions).
 
-`default_alias` must name a configured alias. `--alias NAME` or `--model NAME` overrides it for one launch; the two flags cannot be combined. `/model NAME` selects an alias before the conversation starts. `/models` offers aliases and discovered provider models. Direct `provider/model` selection remains available without defining an alias.
+`default_alias` must name a configured alias. `--alias NAME` or `--model NAME` overrides it for one launch; the two flags cannot be combined. Without either flag or a configured default, Cocoa restores the last model or alias selected interactively, including its thinking level and alias choice. This selection is saved separately in `~/.config/cocoa/selection.json` and never changes `default_alias`. If no usable selection remains, Cocoa opens the model picker, or provider setup when no providers are configured.
+
+`/model NAME` selects an alias before the conversation starts. `/models` offers aliases and discovered provider models. Direct `provider/model` selection remains available without defining an alias.
 
 Selecting an alias by name starts with its first regular choice. The `/models` alias picker lists alias names without a first-model detail. Use left/right to select among the highlighted alias's saved regular choices, then Enter to select that choice for the session. This does not change its saved effort. The separate provider model browser supports effort changes for direct selections.
 

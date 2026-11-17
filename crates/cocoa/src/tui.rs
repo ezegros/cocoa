@@ -170,6 +170,9 @@ pub(crate) async fn run(
             .as_ref()
             .ok()
             .and_then(|configuration| configuration.thinking_level);
+        let selection_missing = matches!(&configuration, Err(config::ConfigError::AliasRequired));
+        let setup_needed = selection_missing
+            || selection.alias.is_some() && matches!(&configuration, Err(config::ConfigError::Alias));
         let setup_error = match configuration {
             Ok(configuration) => {
                 chat = Chat::new(configuration.engine.limits().input_bytes);
@@ -197,10 +200,10 @@ pub(crate) async fn run(
             None => directory.display().to_string(),
         };
         show_selection(chat, &label, &model_label, thinking_level);
-        let onboarding = match if resume.is_some() { Ok(std::collections::BTreeMap::new()) } else { config::aliases() } {
-            Ok(aliases) => {
+        let onboarding = match if resume.is_some() { Ok((std::collections::BTreeMap::new(), false)) } else { config::aliases().and_then(|aliases| Ok((aliases, config::has_configured_providers()?))) } {
+            Ok((aliases, has_providers)) => {
                 chat.set_aliases(&config::alias_names(&aliases));
-                aliases.is_empty() && selection.model.is_none() && open_menu.is_none() && resume.is_none()
+                setup_needed && aliases.is_empty() && selection.model.is_none() && open_menu.is_none() && resume.is_none() && (!has_providers || selection.alias.is_some())
             }
             Err(error) => {
                 chat.input_notice(&error.to_string());
@@ -209,6 +212,8 @@ pub(crate) async fn run(
         };
         if onboarding {
             commands.dialog = Some(Dialog::onboarding(selection.alias.clone()));
+        } else if selection_missing && open_menu.is_none() && resume.is_none() {
+            commands.open("/models", chat);
         } else if resume.is_none() && let Some(error) = setup_error {
             chat.notice(&error);
             chat.notice("Configure an alias with /aliases and save a provider key with /login. No model is running.");
@@ -410,7 +415,7 @@ async fn session(
                 }
                 // Observations can invalidate mouse targets from the previous frame.
                 draw(terminal, chat, commands, &mut dirty, &mut animation_clock, now)?;
-                let action = if commands.dialog.as_ref().is_some_and(Dialog::is_onboarding) {
+                let action = if commands.dialog.is_some() {
                     keyboard(chat, commands, &mut dirty)?
                 } else if let Some(prompt) = prompt.take() {
                     chat.initial_prompt(&prompt)?
@@ -1279,12 +1284,16 @@ async fn resolve_selection(
     selection: config::Selection,
 ) -> Result<config::Configuration, config::ConfigError> {
     tokio::task::spawn_blocking(move || {
-        config::load_selection(
+        let configuration = config::load_selection(
             selection.alias,
             selection.model,
             selection.thinking,
             selection.choice,
-        )
+        )?;
+        if let Err(error) = config::remember_selection(&configuration) {
+            tracing::warn!(%error, "cannot remember model selection");
+        }
+        Ok(configuration)
     })
     .await
     .map_err(|_| config::ConfigError::Worker)?

@@ -1675,6 +1675,76 @@ fn alias_picker_selects_saved_models_without_changing_effort_or_configuration() 
 }
 
 #[test]
+fn stale_selection_does_not_hide_global_configuration_errors() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home(
+        "stale-selection-error",
+        &server.endpoint,
+        true,
+        Some(json!({})),
+    )?;
+    let mut first = Terminal::spawn(&home, &["--model", "openai/remembered"], 100, 28, None)?;
+    first.wait_text("remembered")?;
+    close_command_session(&mut first)?;
+    fs::write(
+        home.join(".config/cocoa/config.json"),
+        serde_json::to_vec(&json!({"providers":{},"input_bytes":0}))?,
+    )?;
+    let mut second = Terminal::spawn(&home, &[], 100, 28, None)?;
+    second.wait_text("invalid bounds")?;
+    assert!(!second.screen().contains("Choose a provider"));
+    assert!(!second.screen().contains("Select model"));
+    close_command_session(&mut second)?;
+    assert!(server.requests()?.is_empty());
+    server.finish()?;
+    Ok(())
+}
+
+#[test]
+fn alias_free_startup_picks_and_remembers_a_model() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home("remembered-model", &server.endpoint, true, Some(json!({})))?;
+    let path = home.join(".config/cocoa/config.json");
+    let before = fs::read(&path)?;
+    let mut first = Terminal::spawn(&home, &["initial model prompt"], 100, 28, None)?;
+    first.wait_text("Select model")?;
+    first.wait_text("+ Enter model ID")?;
+    assert!(server.requests()?.is_empty());
+    first.key(b"\r")?;
+    first.wait_text("Model ID · openai")?;
+    first.command("remembered-model")?;
+    first.wait_text("remembered-model › Thinking")?;
+    first.key(b"\r")?;
+    first.until(|session| !session.screen().contains("Select model"))?;
+    first.wait_text("remembered-model")?;
+    first.wait_text("answer-1")?;
+    assert_eq!(server.requests()?[0].body["model"], "remembered-model");
+    close_command_session(&mut first)?;
+    assert_eq!(fs::read(&path)?, before);
+
+    let mut second = Terminal::spawn(&home, &[], 100, 28, None)?;
+    second.wait_text("remembered-model")?;
+    assert!(!second.screen().contains("Choose a provider"));
+    assert!(!second.screen().contains("Select model"));
+    second.command("remembered model prompt")?;
+    second.wait_text("answer-2")?;
+    assert_eq!(server.requests()?[1].body["model"], "remembered-model");
+    close_command_session(&mut second)?;
+    assert_eq!(fs::read(&path)?, before);
+
+    fs::write(home.join(".config/cocoa/selection.json"), b"invalid JSON")?;
+    let mut third = Terminal::spawn(&home, &[], 100, 28, None)?;
+    third.wait_text("Select model")?;
+    third.key(b"\x1b")?;
+    close_command_session(&mut third)?;
+    assert_eq!(server.requests()?.len(), 2);
+    server.finish()?;
+    Ok(())
+}
+
+#[test]
 fn explicit_models_skip_onboarding_and_alias_changes_clear_the_override() -> io::Result<()> {
     let root = Homes::new()?;
     for (name, aliases, change, expected) in [
@@ -2134,11 +2204,7 @@ fn commands_cycle_regular_choices_without_moving_drafts_or_changing_locked_sessi
     for (name, configured) in [("single-alias", true), ("no-aliases", false)] {
         let home = root.command_home(name, &server.endpoint, configured, None)?;
         let mut idle = Terminal::spawn(&home, &[], 90, 28, None)?;
-        idle.wait_text(if configured {
-            "medium"
-        } else {
-            "Choose a provider"
-        })?;
+        idle.wait_text(if configured { "medium" } else { "Select model" })?;
         if configured {
             idle.command("/models")?;
             idle.wait_text("Models · Aliases")?;
@@ -2147,11 +2213,11 @@ fn commands_cycle_regular_choices_without_moving_drafts_or_changing_locked_sessi
             idle.wait_text(" medium ")?;
             close_command_session(&mut idle)?;
         } else {
-            idle.wait_text("Choose a provider")?;
+            idle.wait_text("Select model")?;
             idle.key(b"\x14")?;
-            idle.wait_text("Choose a provider")?;
-            idle.key(b"\x03")?;
-            idle.finish(0)?;
+            idle.wait_text("Select model")?;
+            idle.key(b"\x1b")?;
+            close_command_session(&mut idle)?;
         }
         assert_eq!(
             server.requests()?.len(),
@@ -2414,7 +2480,13 @@ fn first_run_defers_work_until_start_and_preserves_aliases_when_adding_a_provide
     let server = Provider::start(ProviderKind::Commands)?;
     for (index, review, width) in [(1, false, 90), (2, true, 60)] {
         let home = root.command_home(&format!("setup-{index}"), &server.endpoint, false, None)?;
-        let mut session = Terminal::spawn(&home, &["first setup assignment"], width, 28, None)?;
+        let mut session = Terminal::spawn(
+            &home,
+            &["--alias", "medium", "first setup assignment"],
+            width,
+            28,
+            None,
+        )?;
         session.wait_text("Choose a provider")?;
         session.key(b"\r")?;
         session.wait_text("API key")?;

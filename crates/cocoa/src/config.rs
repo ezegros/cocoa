@@ -40,6 +40,8 @@ pub struct Configuration {
     pub message_steering: bool,
     pub web_search: crate::mcp::SearchProvider,
     pub mcp_servers: BTreeMap<String, crate::mcp::Server>,
+    selection: Selection,
+    providers_configured: Vec<String>,
 }
 
 /// Resolved provider settings and a captured credential source for one alias.
@@ -556,7 +558,8 @@ pub enum McpCommand {
 pub struct ThinkingChoice(pub Option<ThinkingLevel>);
 
 /// A configured alias or a direct `provider/model` selection.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Selection {
     pub alias: Option<String>,
     pub model: Option<String>,
@@ -797,6 +800,8 @@ pub enum ConfigError {
         "aliases require 1..=32 choices, at least one regular choice and priorities from 0 to 99"
     )]
     AliasChoices,
+    #[error("selected alias choice is missing or fallback-only")]
+    AliasChoice,
     #[error(
         "saved session settings differ from the current configuration; restore the original alias, model, account and limits before resuming"
     )]
@@ -873,7 +878,9 @@ pub fn load(alias: Option<String>) -> Result<Configuration, ConfigError> {
     load_selection(alias, None, None, None)
 }
 
-/// Resolve an alias or a direct `provider/model` selection without saving settings.
+/// Resolve explicit selection, then configured default, then remembered selection.
+/// Loading never writes settings or remembered state. Unusable remembered state
+/// returns `AliasRequired` so interactive callers can offer a picker.
 /// Direct selections use the provider's configured endpoint and credential source.
 /// An explicit `credential_env` excludes saved auth; Ollama never reads auth files.
 ///
@@ -886,53 +893,98 @@ pub fn load_selection(
     choice: Option<usize>,
 ) -> Result<Configuration, ConfigError> {
     let file = read_settings()?;
-    let saved_model = model.as_ref().is_some_and(|name| !name.contains('/'));
-    if saved_model {
-        if alias.is_some() {
-            return Err(ConfigError::ModelSelection);
-        }
-        if thinking.is_some() {
-            return Err(ConfigError::ThinkingSelection);
-        }
-        alias = model.take();
-    }
-    let mut configuration = build(
-        Selection {
-            alias,
-            model,
-            thinking,
-            choice,
-        },
-        file,
-    )?;
-    for alias in configuration.candidates.values_mut().flatten() {
-        if let CredentialSource::Subscription { registration } = &mut alias.credential_source {
-            *registration = crate::chatgpt::client(None)?.active_registration().ok();
-        }
-    }
-    let candidates = configuration
-        .candidates
-        .get_mut(&configuration.alias)
-        .ok_or(ConfigError::Alias)?;
-    let mut last_error = ConfigError::Alias;
-    let mut selected = None;
-    for (index, candidate) in candidates.iter_mut().enumerate() {
-        match candidate.resolve_api_key().and_then(|key| {
-            candidate.subscription_credentials()?;
-            Ok(key)
-        }) {
-            Ok(key) => {
-                candidate.api_key = key;
-                selected = Some(index);
-                break;
+    let remembered = if alias.is_none()
+        && model.is_none()
+        && thinking.is_none()
+        && choice.is_none()
+        && file.default_alias.is_none()
+    {
+        read_remembered_selection()
+    } else {
+        None
+    };
+    let provider_removed = remembered.as_ref().is_some_and(|saved| {
+        saved.provider_configured && !file.providers.contains_key(&saved.provider)
+    });
+    let (thinking, choice) = if let Some(saved) = &remembered {
+        alias = saved.selection.alias.clone();
+        model = saved.selection.model.clone();
+        (saved.selection.thinking, saved.selection.choice)
+    } else {
+        (thinking, choice)
+    };
+    let result =
+        resolve_selection(alias, model, thinking, choice, file).and_then(|configuration| {
+            if provider_removed {
+                return Err(ConfigError::AliasRequired);
             }
-            Err(error) => last_error = error,
+            resolve_credentials(configuration).map_err(|error| {
+                if remembered.is_some() {
+                    ConfigError::AliasRequired
+                } else {
+                    error
+                }
+            })
+        });
+    match (result, remembered) {
+        (Ok(configuration), Some(saved)) => {
+            if configuration.model != saved.model
+                || configuration.provider.to_string() != saved.provider
+                || configuration.thinking_level != saved.thinking
+            {
+                return Err(ConfigError::AliasRequired);
+            }
+            Ok(configuration)
         }
+        (Err(ConfigError::Alias | ConfigError::AliasChoice), Some(_)) => {
+            Err(ConfigError::AliasRequired)
+        }
+        (result, _) => result,
     }
-    let index = selected.ok_or(last_error)?;
-    candidates.drain(..index);
-    configuration.select_candidate()?;
-    Ok(configuration)
+}
+
+/// Persist the resolved interactive selection separately from configured defaults.
+/// Uses the original alias choice and provider configuration captured during resolution.
+/// Does not reread settings, resolve credentials or serialize secrets.
+///
+/// # Errors
+/// Reject unavailable home directories or failed state persistence.
+pub fn remember_selection(configuration: &Configuration) -> Result<(), ConfigError> {
+    use std::io::Write;
+    let remembered = RememberedSelection {
+        provider_configured: configuration
+            .providers_configured
+            .contains(&configuration.provider.to_string()),
+        selection: configuration.selection.clone(),
+        provider: configuration.provider.to_string(),
+        model: configuration.model.clone(),
+        thinking: configuration.thinking_level,
+    };
+    let path = selection_path().ok_or(ConfigError::Save)?;
+    let parent = path.parent().ok_or(ConfigError::Save)?;
+    std::fs::create_dir_all(parent).map_err(|_| ConfigError::Save)?;
+    let bytes = serde_json::to_vec(&remembered).map_err(|_| ConfigError::Save)?;
+    if bytes.len() > 65_536 {
+        return Err(ConfigError::FileLimit);
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|_| ConfigError::Save)?;
+    temporary
+        .write_all(&bytes)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|_| ConfigError::Save)?;
+    temporary.persist(&path).map_err(|_| ConfigError::Save)?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| ConfigError::Sync)
+}
+
+/// Whether startup has configured providers or aliases to offer in the model picker.
+///
+/// # Errors
+/// Reject unreadable, oversized or malformed configuration.
+pub fn has_configured_providers() -> Result<bool, ConfigError> {
+    let file = read_settings()?;
+    Ok(!file.providers.is_empty() || !file.aliases.is_empty())
 }
 
 /// Read presentation settings without resolving a provider or requiring credentials.
@@ -1474,6 +1526,8 @@ fn read_settings() -> Result<Settings, ConfigError> {
 }
 
 fn build(selection: Selection, mut file: Settings) -> Result<Configuration, ConfigError> {
+    let providers_configured = file.providers.keys().cloned().collect();
+    let direct_selection = selection.model.clone();
     if selection.model.is_some() && selection.alias.is_some() {
         return Err(ConfigError::ModelSelection);
     }
@@ -1586,20 +1640,11 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
     {
         return Err(ConfigError::DefaultAlias);
     }
-    let name = match &direct {
-        Some((selection, _)) => selection.clone(),
-        None => {
-            let name = selection
-                .alias
-                .clone()
-                .or_else(|| file.default_alias.clone())
-                .ok_or(ConfigError::AliasRequired)?;
-            if !file.aliases.contains_key(&name) {
-                return Err(ConfigError::Alias);
-            }
-            name
-        }
-    };
+    let name = direct
+        .as_ref()
+        .map(|(selection, _)| selection.clone())
+        .or(selection.alias.clone())
+        .or(file.default_alias.clone());
     let input_bytes = file.input_bytes.unwrap_or(8 * 1024 * 1024);
     let output_bytes = file.output_bytes.unwrap_or(65_536);
     let timeout_ms = file.timeout_ms.unwrap_or(600_000);
@@ -1633,6 +1678,8 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
         .collect();
     let mut aliases = BTreeMap::new();
     let mut candidates = BTreeMap::new();
+    let mut resolved_selection = Selection::default();
+    let mut choice_invalid = false;
     for (alias_name, entries) in file.aliases.into_iter().chain(direct) {
         let regular = entries
             .iter()
@@ -1641,7 +1688,7 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
             .min_by_key(|(_, entry)| entry.priority)
             .map(|(index, _)| index)
             .ok_or(ConfigError::AliasChoices)?;
-        let selected = if alias_name == name {
+        let selected = if name.as_deref() == Some(alias_name.as_str()) {
             selection.choice.unwrap_or(regular)
         } else {
             regular
@@ -1650,7 +1697,23 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
             .get(selected)
             .is_none_or(|entry| entry.fallback_only)
         {
-            return Err(ConfigError::AliasChoices);
+            choice_invalid = true;
+        }
+        let selected = if choice_invalid { regular } else { selected };
+        if name.as_deref() == Some(alias_name.as_str()) {
+            resolved_selection = if let Some(model) = &direct_selection {
+                Selection {
+                    model: Some(model.clone()),
+                    thinking: selection.thinking,
+                    ..Selection::default()
+                }
+            } else {
+                Selection {
+                    alias: Some(alias_name.clone()),
+                    choice: Some(selected),
+                    ..Selection::default()
+                }
+            };
         }
         let mut indices: Vec<_> = entries
             .iter()
@@ -1710,7 +1773,6 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
     if aliases.len() > 64 {
         return Err(ConfigError::Tables);
     }
-    let alias = aliases.get(&name).ok_or(ConfigError::Alias)?;
     // Canonical responses retain both the action and provider replay data.
     let record_bytes = 2 * DECODER_BYTES + 4096;
     let context_bytes = 4 * DECODER_BYTES;
@@ -1728,7 +1790,14 @@ fn build(selection: Selection, mut file: Settings) -> Result<Configuration, Conf
     let engine = EngineSettings::new(limits)
         .and_then(|settings| settings.with_compaction(policy))
         .map_err(|_| ConfigError::Bounds)?;
+    let name = name.ok_or(ConfigError::AliasRequired)?;
+    if choice_invalid {
+        return Err(ConfigError::AliasChoice);
+    }
+    let alias = aliases.get(&name).ok_or(ConfigError::Alias)?;
     Ok(Configuration {
+        selection: resolved_selection,
+        providers_configured,
         alias: name,
         provider: alias.kind,
         model: alias.model.clone(),
@@ -1847,4 +1916,98 @@ fn credential_reference<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<String>, D::Error> {
     // An explicit null must not silently select saved auth or a default variable.
     String::deserialize(deserializer).map(Some)
+}
+
+fn resolve_selection(
+    mut alias: Option<String>,
+    mut model: Option<String>,
+    thinking: Option<ThinkingLevel>,
+    choice: Option<usize>,
+    file: Settings,
+) -> Result<Configuration, ConfigError> {
+    let saved_model = model.as_ref().is_some_and(|name| !name.contains('/'));
+    if saved_model {
+        if alias.is_some() {
+            return Err(ConfigError::ModelSelection);
+        }
+        if thinking.is_some() {
+            return Err(ConfigError::ThinkingSelection);
+        }
+        alias = model.take();
+    }
+    build(
+        Selection {
+            alias,
+            model,
+            thinking,
+            choice,
+        },
+        file,
+    )
+}
+
+fn resolve_credentials(mut configuration: Configuration) -> Result<Configuration, ConfigError> {
+    for alias in configuration.candidates.values_mut().flatten() {
+        if let CredentialSource::Subscription { registration } = &mut alias.credential_source {
+            *registration = crate::chatgpt::client(None)?.active_registration().ok();
+        }
+    }
+    let candidates = configuration
+        .candidates
+        .get_mut(&configuration.alias)
+        .ok_or(ConfigError::Alias)?;
+    let mut last_error = ConfigError::Alias;
+    let mut selected = None;
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        match candidate.resolve_api_key().and_then(|key| {
+            candidate.subscription_credentials()?;
+            Ok(key)
+        }) {
+            Ok(key) => {
+                candidate.api_key = key;
+                selected = Some(index);
+                break;
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    let index = selected.ok_or(last_error)?;
+    candidates.drain(..index);
+    configuration.select_candidate()?;
+    Ok(configuration)
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RememberedSelection {
+    selection: Selection,
+    provider_configured: bool,
+    provider: String,
+    model: String,
+    thinking: Option<ThinkingLevel>,
+}
+
+fn selection_path() -> Option<PathBuf> {
+    std::env::home_dir().map(|home| home.join(".config/cocoa/selection.json"))
+}
+
+fn read_remembered_selection() -> Option<RememberedSelection> {
+    let mut bytes = Vec::new();
+    File::open(selection_path()?)
+        .ok()?
+        .take(65_537)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 65_536 {
+        return None;
+    }
+    let saved: RememberedSelection = serde_json::from_slice(&bytes).ok()?;
+    match (&saved.selection.alias, &saved.selection.model) {
+        (Some(alias), None) if valid_name(alias) && saved.selection.thinking.is_none() => {}
+        (None, Some(model)) if saved.selection.choice.is_none() => {
+            direct_model(model).ok()?;
+        }
+        _ => return None,
+    }
+    Some(saved)
 }
