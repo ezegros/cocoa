@@ -1573,6 +1573,11 @@ impl Dialog {
         self.page = Page::Accounts;
         match cocoa::chatgpt::client(None).and_then(|client| client.accounts()) {
             Ok(accounts) => {
+                self.page = if accounts.is_empty() {
+                    Page::PlanConsent { registration: None }
+                } else {
+                    Page::Accounts
+                };
                 self.accounts = accounts;
             }
             Err(error) => self.status = error.to_string(),

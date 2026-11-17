@@ -430,12 +430,9 @@ async fn centered_mcp_menu_adds_filters_inspects_disables_and_removes_servers()
         assert!(settings.get("mcp_servers").is_none());
         session.key(b"\x1b")?;
         session.command("/login chatgpt")?;
-        session.wait_text("Subscriptions")?;
-        session.wait_text("/ Filter")?;
-        session.wait_text("+ Add subscription")?;
-        session.wait_text("↑↓ select · Enter choose · Esc back")?;
-        session.key(b"\r")?;
+        session.wait_text("Use your ChatGPT plan?")?;
         session.wait_text("No API fallback.")?;
+        assert!(!session.screen().contains("+ Add subscription"));
         session.key(b"\x03")?;
         session.until(|session| !session.contains("No API fallback.") && !session.contains("Subscriptions"))?;
         session.command("exit")?;
