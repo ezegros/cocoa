@@ -2470,8 +2470,7 @@ fn startup_fallback_updates_the_pinned_model_and_effort_during_work_and_after_re
 }
 
 #[test]
-fn first_run_defers_work_until_start_and_preserves_aliases_when_adding_a_provider() -> io::Result<()>
-{
+fn first_run_selects_a_concrete_model_without_creating_aliases() -> io::Result<()> {
     let root = Homes::new()?;
     let home = root.0.join("fresh");
     fs::create_dir(&home)?;
@@ -2482,7 +2481,7 @@ fn first_run_defers_work_until_start_and_preserves_aliases_when_adding_a_provide
     assert!(!home.join(".config/cocoa/config.json").exists());
 
     let server = Provider::start(ProviderKind::Commands)?;
-    for (index, review, width) in [(1, false, 90), (2, true, 60)] {
+    for (index, width) in [(1, 90), (2, 60)] {
         let home = root.command_home(&format!("setup-{index}"), &server.endpoint, false, None)?;
         let mut session = Terminal::spawn(
             &home,
@@ -2491,79 +2490,33 @@ fn first_run_defers_work_until_start_and_preserves_aliases_when_adding_a_provide
             28,
             None,
         )?;
+        let before = configuration(&session)?;
         session.wait_text("Choose a provider")?;
         session.key(b"\r")?;
         session.wait_text("API key")?;
         session.command("onboarding-private-sentinel")?;
-        session.wait_text("Catalogue unavailable")?;
+        session.wait_text("openai › Choose a model")?;
+        session.wait_text("Enter model ID")?;
         assert_eq!(
             server.requests()?.len(),
             index - 1,
-            "setup started inference"
+            "connecting a provider submitted the initial prompt"
         );
-        assert!(!home.join(".config/cocoa/auth.json").exists());
+        assert!(home.join(".config/cocoa/auth.json").exists());
+        assert!(!has_bytes(&session.transcript, b"Ready to work"));
+        assert!(!has_bytes(&session.transcript, b"+ Add alias"));
+        assert!(!has_bytes(&session.transcript, b"Create an alias"));
         session.key(b"\r")?;
-        session.wait_text("Model ID")?;
+        session.wait_text("openai › Model ID")?;
         session.command("onboarding-model")?;
-        session.wait_text("Ready to work")?;
-        session.wait_text("Start with medium")?;
-        assert_eq!(
-            configuration(&session)?["aliases"]["medium"][0],
-            json!({"provider":"openai","model":"onboarding-model","priority":0})
-        );
-        assert_eq!(
-            server.requests()?.len(),
-            index - 1,
-            "saving aliases submitted the initial prompt"
-        );
-        if review {
-            let before = configuration(&session)?;
-            session.key(b"\x1b[F\r")?;
-            session.wait_text("Choose a provider")?;
-            session.command("baseten")?;
-            session.wait_text("API key")?;
-            session.command("second-provider-private-sentinel")?;
-            session.wait_text("Catalogue unavailable")?;
-            session.wait_text("Save provider only")?;
-            session.key(b"\r")?;
-            session.wait_text("Ready to work")?;
-            let after = configuration(&session)?;
-            assert_eq!(after["aliases"], before["aliases"]);
-            assert_eq!(after["default_alias"], before["default_alias"]);
-            session.key(b"\x1b[B\r")?;
-            session.wait_text("+ Add alias")?;
-            session.key(b"\x1b[B\r")?;
-            session.wait_text("medium › Model choices")?;
-            session.key(b"\r")?;
-            session.wait_text("medium › Edit model")?;
-            session.key(b"\r")?;
-            session.wait_text("medium › Model")?;
-            session.command("manual-entry-filter")?;
-            session.wait_text("Model ID")?;
-            session.command("reviewed-model")?;
-            session.wait_text("medium › Thinking")?;
-            session.key(b"\r")?;
-            session.wait_text("medium › Priority")?;
-            session.key(b"\r")?;
-            session.wait_text("✓ Alias saved")?;
-            session.key(b"\x1b")?;
-            session.wait_text("+ Add alias")?;
-            session.key(b"\x1b")?;
-            session.wait_text("Ready to work")?;
-        }
-        session.key(b"\r")?;
         session.wait_text(&format!("answer-{index}"))?;
+        let after = configuration(&session)?;
+        assert_eq!(after["aliases"], before["aliases"]);
+        assert_eq!(after["default_alias"], before["default_alias"]);
         let requests = server.requests()?;
         assert_eq!(requests.len(), index);
         let request = &requests[index - 1];
-        assert_eq!(
-            request.body["model"],
-            if review {
-                "reviewed-model"
-            } else {
-                "onboarding-model"
-            }
-        );
+        assert_eq!(request.body["model"], "onboarding-model");
         assert_eq!(
             request.body["input"][0]["content"],
             "first setup assignment"
@@ -2571,13 +2524,17 @@ fn first_run_defers_work_until_start_and_preserves_aliases_when_adding_a_provide
         assert_eq!(request.authorization, "Bearer onboarding-private-sentinel");
         assert!(!has_bytes(
             &session.transcript,
-            b"second-provider-private-sentinel"
+            b"onboarding-private-sentinel"
         ));
         close_command_session(&mut session)?;
         let mut returning = Terminal::spawn(&home, &[], width, 28, None)?;
-        returning.wait_text(" medium ")?;
+        returning.wait_text("onboarding-model")?;
         assert!(!returning.contains("Choose a provider"));
+        assert!(!returning.contains("Select model"));
         close_command_session(&mut returning)?;
+        let returned = configuration(&returning)?;
+        assert_eq!(returned["aliases"], before["aliases"]);
+        assert_eq!(returned["default_alias"], before["default_alias"]);
     }
     server.finish()
 }

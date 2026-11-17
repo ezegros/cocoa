@@ -211,7 +211,7 @@ pub(crate) async fn run(
             }
         };
         if onboarding {
-            commands.dialog = Some(Dialog::onboarding(selection.alias.clone()));
+            commands.dialog = Some(Dialog::onboarding());
         } else if selection_missing && open_menu.is_none() && resume.is_none() {
             commands.open("/models", chat);
         } else if resume.is_none() && let Some(error) = setup_error {
@@ -1815,7 +1815,7 @@ enum PasteSource {
 enum Saved {
     AliasChoices,
     Key,
-    Setup,
+    Setup(cocoa_llm::ProviderKind),
     Subscription,
     SignedOut,
     Link,
@@ -1983,7 +1983,6 @@ impl Commands {
         match action {
             dialog::Action::None => {}
             dialog::Action::Exit => return Action::Exit,
-            dialog::Action::FinishSetup => self.dialog = None,
             dialog::Action::CancelConnection => {
                 if let Some((cancellation, _)) = self.mcp_job.take() {
                     cancellation.cancel();
@@ -2119,17 +2118,13 @@ impl Commands {
                     }),
                 ));
             }
-            dialog::Action::SaveSetup {
-                provider,
-                key,
-                aliases,
-            } => {
+            dialog::Action::SaveSetup { provider, key } => {
                 self.save = Some(tokio::task::spawn_blocking(move || {
                     if let Some(key) = key {
                         auth::save(provider, Some(key))?;
                     }
-                    config::save_setup(provider, aliases)?;
-                    Ok(Saved::Setup)
+                    config::save_provider(provider)?;
+                    Ok(Saved::Setup(provider))
                 }));
             }
             dialog::Action::SelectAliasChoice { alias, choice } => {
@@ -2360,8 +2355,7 @@ impl Commands {
                     let action = match result {
                         Ok(Ok(catalogue)) => dialog.setup_catalogue(provider, catalogue),
                         Ok(Err(LocalError::Connect(catalogue::ConnectError::Unavailable))) => {
-                            dialog.setup_unavailable(provider);
-                            dialog::Action::None
+                            dialog.setup_without_catalogue(provider)
                         }
                         result => {
                             let error = match result {
@@ -2411,10 +2405,10 @@ impl Commands {
                             dialog.alias_choices_saved();
                         }
                     }
-                    Ok(Ok(Saved::Setup)) => {
+                    Ok(Ok(Saved::Setup(provider))) => {
                         outcome.settings_saved = true;
                         if let Some(dialog) = &mut self.dialog {
-                            dialog.setup_saved();
+                            dialog.setup_saved(provider);
                         }
                     }
                     Ok(Ok(Saved::Key)) => {

@@ -1255,6 +1255,22 @@ pub fn save_alias(
     })
 }
 
+/// Register a provider without changing aliases or the default selection.
+///
+/// # Errors
+/// Reject malformed settings, unsafe storage and failed saves.
+pub fn save_provider(provider: ProviderKind) -> Result<(), ConfigError> {
+    save_settings(|file| {
+        file.providers
+            .entry(provider.to_string())
+            .or_insert(Provider {
+                credential_env: None,
+                endpoint: None,
+            });
+        Ok(String::new())
+    })
+}
+
 /// Register a provider, seeding aliases only if none exist when the lock is acquired.
 /// Existing mappings, provider settings and the default alias are preserved.
 ///

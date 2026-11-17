@@ -349,7 +349,6 @@ pub(crate) enum Action {
     None,
     Close,
     Exit,
-    FinishSetup,
     CancelConnection,
     McpAdd {
         name: String,
@@ -372,7 +371,6 @@ pub(crate) enum Action {
     SaveSetup {
         provider: ProviderKind,
         key: Option<SecretString>,
-        aliases: Vec<config::AliasSuggestion>,
     },
     SaveAliasChoices {
         name: String,
@@ -450,7 +448,6 @@ enum Page {
     SetupManual {
         provider: ProviderKind,
     },
-    SetupReady,
     AliasEntries,
     AliasEntry,
     Priority {
@@ -484,8 +481,6 @@ enum Page {
 pub(crate) struct Dialog {
     page: Page,
     onboarding: bool,
-    requested_alias: Option<String>,
-    default_alias: String,
     aliases: BTreeMap<String, Vec<Alias>>,
     editing_alias: String,
     editing_entry: Option<usize>,
@@ -506,10 +501,9 @@ pub(crate) struct Dialog {
 }
 
 impl Dialog {
-    pub fn onboarding(alias: Option<String>) -> Self {
+    pub fn onboarding() -> Self {
         let mut dialog = Self::new(Page::SetupProviders);
         dialog.onboarding = true;
-        dialog.requested_alias = alias;
         dialog
     }
 
@@ -518,17 +512,9 @@ impl Dialog {
     }
 
     pub fn setup_catalogue(&mut self, provider: ProviderKind, catalogue: Catalogue) -> Action {
-        let aliases = catalogue.suggested_aliases(provider);
         self.models.retain(|model| model.provider != provider);
         self.models.extend(catalogue.models);
-        if !self.aliases.is_empty() || !aliases.is_empty() {
-            return self.save_setup(provider, aliases);
-        }
-        self.setup_unavailable(provider);
-        if self.models.iter().any(|model| model.provider == provider) {
-            self.status = "Choose a tool-capable model. No suggested alias matched.".into();
-        }
-        Action::None
+        self.save_setup(provider)
     }
 
     pub fn setup_unavailable(&mut self, provider: ProviderKind) {
@@ -553,26 +539,16 @@ impl Dialog {
         self.status = message;
     }
 
-    pub fn setup_saved(&mut self) {
-        match config::aliases() {
-            Ok(aliases) => self.aliases = aliases,
-            Err(error) => {
-                self.error(error.to_string());
-                return;
-            }
-        }
-        match config::load(self.requested_alias.clone()) {
-            Ok(configuration) => self.default_alias = configuration.alias,
-            Err(error) => {
-                self.error(error.to_string());
-                return;
-            }
-        }
+    pub fn setup_saved(&mut self, provider: ProviderKind) {
         self.secret = "".into();
-        self.query.clear();
-        self.page = Page::SetupReady;
-        self.selected = 0;
-        self.status = "✓ Settings saved. Inference not tested.".into();
+        self.setup_unavailable(provider);
+        if self.models.iter().any(|model| model.provider == provider) {
+            self.status = "Choose a tool-capable model.".into();
+        }
+    }
+
+    pub fn setup_without_catalogue(&mut self, provider: ProviderKind) -> Action {
+        self.save_setup(provider)
     }
 
     pub fn aliases() -> Self {
@@ -815,9 +791,7 @@ impl Dialog {
                 }
                 Page::Accounts | Page::PlanConsent { .. } => return Action::Close,
                 Page::Account { .. } | Page::OAuthWaiting => Page::Accounts,
-                Page::SetupProviders if !self.aliases.is_empty() => Page::SetupReady,
                 Page::SetupProviders => return Action::Exit,
-                Page::SetupReady => Page::SetupProviders,
                 Page::SetupModels { .. } => Page::SetupProviders,
                 Page::SetupManual { provider } => Page::SetupModels {
                     provider: *provider,
@@ -847,7 +821,6 @@ impl Dialog {
                     Page::Aliases
                 }
                 Page::AliasEntry | Page::Priority { .. } => Page::AliasEntries,
-                Page::Aliases if self.onboarding => Page::SetupReady,
                 Page::Aliases | Page::Providers { .. } => {
                     return Action::Close;
                 }
@@ -980,7 +953,6 @@ impl Dialog {
             Page::SetupLoading { provider } => format!("Connect › {provider}"),
             Page::SetupModels { provider } => format!("{provider} › Choose a model"),
             Page::SetupManual { provider } => format!("{provider} › Model ID"),
-            Page::SetupReady => "Ready to work".into(),
             Page::AliasEntries => format!("{} › Model choices", self.editing_alias),
             Page::AliasEntry => format!("{} › Edit model", self.editing_alias),
             Page::Priority { .. } => format!("{} › Priority", self.editing_alias),
@@ -1058,7 +1030,6 @@ impl Dialog {
             Page::SetupLoading { .. } => "No generation request. Esc back · Ctrl+C quit",
             Page::SetupModels { .. } => "Choose a model, or retry discovery.",
             Page::SetupManual { .. } => "Exact model ID. Key and inference are unverified.",
-            Page::SetupReady => "Start now, or review aliases.",
             Page::AliasEntries => {
                 "Ctrl+T cycles regular choices by priority; ties keep list order."
             }
@@ -1131,16 +1102,6 @@ impl Dialog {
                     "Choose subscription use or separate API billing".into()
                 }
                 Page::OAuthWaiting => "Browser sign-in · Esc cancels".into(),
-                Page::SetupReady => format!(
-                    "{} · {} {} configured",
-                    self.default_alias,
-                    self.aliases.len(),
-                    if self.aliases.len() == 1 {
-                        "alias"
-                    } else {
-                        "aliases"
-                    }
-                ),
                 Page::SetupLoading { .. } => "Connecting...".into(),
                 Page::Thinking { model, .. } => format!("{} · {}", model.id, model.provider),
                 Page::Models { .. } if text.is_empty() && inner.width < 44 => {
@@ -1234,11 +1195,7 @@ impl Dialog {
                 .bottom()
                 .saturating_sub(if inline_selection { 5 } else { 4 })
                 .saturating_sub(rows_y)
-                .min(if self.onboarding && matches!(self.page, Page::Aliases) {
-                    8
-                } else {
-                    7
-                }),
+                .min(7),
         );
         let visible = usize::from(self.rows_area.height);
         self.first = self.selected.saturating_sub(visible.saturating_sub(1));
@@ -1381,7 +1338,6 @@ impl Dialog {
                     | Page::PlanConsent { .. }
                     | Page::OAuthWaiting
                     | Page::Logout { .. }
-                    | Page::SetupReady
                     | Page::SetupLoading { .. }
             )
         {
@@ -1548,7 +1504,6 @@ impl Dialog {
                 Page::SetupLoading { .. } => "Esc cancel · Ctrl+C quit",
                 Page::SetupModels { .. } => "Enter choose · Esc back · Ctrl+C quit",
                 Page::SetupManual { .. } => "Enter save · Esc back",
-                Page::SetupReady => "Enter start / choose · Ctrl+C quit",
                 Page::Login { .. } if self.onboarding => "Enter connect · Esc back",
                 Page::Thinking {
                     target: ModelTarget::Session,
@@ -1588,8 +1543,6 @@ impl Dialog {
         Self {
             page,
             onboarding: false,
-            requested_alias: None,
-            default_alias: "medium".into(),
             aliases: BTreeMap::new(),
             editing_alias: String::new(),
             editing_entry: None,
@@ -1895,34 +1848,19 @@ impl Dialog {
                     target: ModelTarget::Session,
                 };
             }
-            Page::SetupReady => match self.selected {
-                0 => return Action::FinishSetup,
-                1 => self.page = Page::Aliases,
-                _ => self.page = Page::SetupProviders,
-            },
             Page::SetupModels { provider } => {
                 let provider = *provider;
                 let choices = self.setup_models(provider);
-                if self.aliases.is_empty()
-                    && let Some(model) = choices.get(self.selected)
-                {
-                    return self.save_setup(
-                        provider,
-                        vec![config::AliasSuggestion {
-                            name: "medium".into(),
-                            model: model.id.clone(),
-                            thinking_level: None,
-                        }],
-                    );
+                if let Some(model) = choices.get(self.selected) {
+                    return Action::SelectModel {
+                        model: format!("{provider}/{}", model.id),
+                        thinking: None,
+                    };
                 }
                 match row.as_deref() {
-                    Some("Save provider only") => return self.save_setup(provider, Vec::new()),
                     Some("Enter model ID") => self.page = Page::SetupManual { provider },
                     Some("Retry discovery") => return self.connect_provider(provider),
-                    _ => {
-                        self.secret = "".into();
-                        self.page = Page::SetupProviders;
-                    }
+                    _ => self.page = Page::SetupProviders,
                 }
             }
             Page::SetupManual { provider } => {
@@ -1930,20 +1868,13 @@ impl Dialog {
                     self.status = "Enter the exact tool-capable model ID.".into();
                     return Action::None;
                 }
-                return self.save_setup(
-                    *provider,
-                    vec![config::AliasSuggestion {
-                        name: "medium".into(),
-                        model: self.query.clone(),
-                        thinking_level: None,
-                    }],
-                );
+                return Action::SelectModel {
+                    model: format!("{provider}/{}", self.query.trim()),
+                    thinking: None,
+                };
             }
             Page::Aliases => {
                 if let Some(name) = row {
-                    if self.onboarding && self.selected == 0 {
-                        return Action::FinishSetup;
-                    }
                     self.page = if name == "+ Add alias" {
                         Page::Name
                     } else {
@@ -2189,17 +2120,12 @@ impl Dialog {
         }
     }
 
-    fn save_setup(
-        &mut self,
-        provider: ProviderKind,
-        aliases: Vec<config::AliasSuggestion>,
-    ) -> Action {
+    fn save_setup(&mut self, provider: ProviderKind) -> Action {
         self.page = Page::SetupLoading { provider };
-        self.status = "Saving provider and alias settings...".into();
+        self.status = "Saving provider settings...".into();
         Action::SaveSetup {
             provider,
             key: (!self.secret.expose_secret().is_empty()).then(|| self.secret.clone()),
-            aliases,
         }
     }
 
@@ -2449,29 +2375,14 @@ impl Dialog {
                     )
                 })
                 .collect(),
-            Page::SetupReady => vec![
-                (
-                    format!("Start with {}", self.default_alias),
-                    "Use the default alias".into(),
-                ),
-                ("Review and edit aliases".into(), "Optional".into()),
-                ("Add another provider".into(), "Optional".into()),
-            ],
             Page::SetupModels { provider } => {
-                if !self.aliases.is_empty() {
-                    return vec![
-                        ("Save provider only".into(), "Keep existing aliases".into()),
-                        ("Retry discovery".into(), String::new()),
-                        ("Choose another provider".into(), String::new()),
-                    ];
-                }
                 let mut rows: Vec<_> = self
                     .setup_models(*provider)
                     .into_iter()
                     .map(|model| (model.display_name.unwrap_or(model.id.clone()), model.id))
                     .collect();
                 if *provider != ProviderKind::Ollama {
-                    rows.push(("Enter model ID".into(), "One medium alias".into()));
+                    rows.push(("Enter model ID".into(), String::new()));
                 }
                 rows.push(("Retry discovery".into(), String::new()));
                 rows.push(("Choose another provider".into(), String::new()));
@@ -2561,15 +2472,6 @@ impl Dialog {
                     })
                     .collect();
                 rows.push(("+ Add alias".into(), String::new()));
-                if self.onboarding {
-                    rows.insert(
-                        0,
-                        (
-                            format!("Start with {}", self.default_alias),
-                            "Use these aliases".into(),
-                        ),
-                    );
-                }
                 rows
             }
             Page::Models { .. } => {
