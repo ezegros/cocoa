@@ -397,6 +397,29 @@ enum ModelTarget {
     Session,
 }
 
+enum ModelRow {
+    Heading(String),
+    Spacer,
+    Model(Model),
+}
+
+#[derive(Clone, Copy)]
+enum PinAction {
+    Toggle,
+    MoveUp,
+    MoveDown,
+}
+
+enum SelectorKind {
+    Alias,
+    Model,
+}
+
+enum FocusDirection {
+    Forward,
+    Backward,
+}
+
 struct ModelSelection {
     key: String,
     model: Model,
@@ -485,6 +508,8 @@ pub(crate) struct Dialog {
     editing_alias: String,
     editing_entry: Option<usize>,
     models: Vec<Model>,
+    preferences: config::SelectorPreferences,
+    preferences_error: Option<String>,
     connected_providers: Vec<ProviderKind>,
     thinking_choices: BTreeMap<String, Option<ThinkingLevel>>,
     alias_choices: BTreeMap<String, usize>,
@@ -558,6 +583,13 @@ impl Dialog {
             Ok(aliases) => dialog.aliases = aliases,
             Err(error) => dialog.status = error.to_string(),
         }
+        match config::selector_preferences() {
+            Ok(preferences) => dialog.preferences = preferences,
+            Err(error) => {
+                dialog.status = error.to_string();
+                dialog.preferences_error = Some(dialog.status.clone());
+            }
+        }
         dialog
     }
 
@@ -578,6 +610,7 @@ impl Dialog {
         } else {
             Page::ModelPicker
         };
+        dialog.normalize_model_focus(FocusDirection::Forward);
         dialog
     }
 
@@ -606,6 +639,24 @@ impl Dialog {
                 .map_or(0, |entries| entries.len().saturating_sub(1)),
         );
         self.status = "✓ Alias saved. Live sessions unchanged.".into();
+        if self.preferences_error.is_none() {
+            let mut preferences = self.preferences.clone();
+            preferences
+                .alias_pins
+                .retain(|name| self.aliases.contains_key(name));
+            preferences
+                .alias_recent
+                .retain(|name| self.aliases.contains_key(name));
+            if preferences != self.preferences {
+                match config::save_selector_preferences(&preferences) {
+                    Ok(()) => self.preferences = preferences,
+                    Err(error) => {
+                        self.status =
+                            format!("Alias saved, but selector preferences were not saved: {error}")
+                    }
+                }
+            }
+        }
     }
 
     pub fn mcp(servers: Vec<cocoa::mcp::ServerView>) -> Self {
@@ -675,6 +726,7 @@ impl Dialog {
     }
 
     pub fn catalogue(&mut self, catalogue: Catalogue) {
+        let focus = self.model_selection().map(|selection| selection.key);
         let thinking = self.levels().get(self.selected).copied();
         self.models = catalogue.models;
         self.connected_providers = catalogue.connected;
@@ -688,7 +740,11 @@ impl Dialog {
                 .and_then(|thinking| self.levels().iter().position(|level| *level == thinking))
                 .unwrap_or(0);
         }
-        self.status = if catalogue.unavailable.is_empty() {
+        self.restore_model_focus(focus.as_deref());
+        self.normalize_model_focus(FocusDirection::Forward);
+        self.status = if let Some(error) = &self.preferences_error {
+            error.clone()
+        } else if catalogue.unavailable.is_empty() {
             String::new()
         } else {
             "Some models unavailable. Manual entry available.".into()
@@ -703,6 +759,39 @@ impl Dialog {
     }
 
     pub fn input(&mut self, event: Event) -> Action {
+        let focus = self.model_selection().map(|selection| selection.key);
+        let alias_focus = self.alias_selection().map(|(alias, _)| alias);
+        let query = self.query.clone();
+        let direction = match &event {
+            Event::Key(key)
+                if matches!(key.code, KeyCode::Up | KeyCode::PageUp | KeyCode::End)
+                    || key.code == KeyCode::Char('p') && key.modifiers == KeyModifiers::CONTROL =>
+            {
+                FocusDirection::Backward
+            }
+            Event::Mouse(mouse) if mouse.kind == MouseEventKind::ScrollUp => {
+                FocusDirection::Backward
+            }
+            _ => FocusDirection::Forward,
+        };
+        let action = self.input_event(event);
+        if self.query != query {
+            self.restore_model_focus(focus.as_deref());
+            if matches!(self.page, Page::ModelPicker)
+                && let Some(alias) = alias_focus
+                && let Some(index) = self
+                    .saved_alias_names()
+                    .iter()
+                    .position(|name| name == &alias)
+            {
+                self.selected = index;
+            }
+        }
+        self.normalize_model_focus(direction);
+        action
+    }
+
+    fn input_event(&mut self, event: Event) -> Action {
         let key = match event {
             Event::Mouse(mouse) => {
                 match mouse.kind {
@@ -840,6 +929,21 @@ impl Dialog {
         if self.waiting() {
             return Action::None;
         }
+        if matches!(self.page, Page::Models { .. } | Page::ModelPicker) {
+            if key.code == KeyCode::Char(' ') && key.modifiers == KeyModifiers::CONTROL {
+                self.change_pin(PinAction::Toggle);
+                return Action::None;
+            }
+            if key.modifiers == KeyModifiers::ALT && matches!(key.code, KeyCode::Up | KeyCode::Down)
+            {
+                self.change_pin(if key.code == KeyCode::Up {
+                    PinAction::MoveUp
+                } else {
+                    PinAction::MoveDown
+                });
+                return Action::None;
+            }
+        }
         let code = match (key.code, key.modifiers) {
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => KeyCode::Down,
             (KeyCode::Char('p'), KeyModifiers::CONTROL) => KeyCode::Up,
@@ -858,6 +962,15 @@ impl Dialog {
         match code {
             KeyCode::Home => self.selected = 0,
             KeyCode::End => self.selected = self.rows().len().saturating_sub(1),
+            KeyCode::PageUp => {
+                self.selected = self
+                    .selected
+                    .saturating_sub(usize::from(self.rows_area.height).max(1));
+            }
+            KeyCode::PageDown => {
+                self.selected = (self.selected + usize::from(self.rows_area.height).max(1))
+                    .min(self.rows().len().saturating_sub(1));
+            }
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down => {
                 self.selected = (self.selected + 1).min(self.rows().len().saturating_sub(1))
@@ -923,8 +1036,14 @@ impl Dialog {
     pub fn render(&mut self, frame: &mut Frame<'_>, theme: Theme) {
         let palette = theme.palette();
         let bounds = frame.area();
+        self.normalize_model_focus(FocusDirection::Forward);
         let width = bounds.width.saturating_sub(4).min(76);
-        let height = bounds.height.saturating_sub(2).min(20);
+        let height_max = if matches!(self.page, Page::ModelPicker | Page::Models { .. }) {
+            22
+        } else {
+            20
+        };
+        let height = bounds.height.saturating_sub(2).min(height_max);
         let spacious = height >= 20;
         self.area = Rect::new(
             bounds.x + (bounds.width - width) / 2,
@@ -1186,16 +1305,26 @@ impl Dialog {
             lines
         };
         let rows = self.rows();
+        let model_rows = if matches!(self.page, Page::Models { .. }) {
+            self.model_rows()
+        } else {
+            Vec::new()
+        };
         let saved = self.saved_selection();
         self.selected = self.selected.min(rows.len().saturating_sub(1));
         let rows_y = inner.y + lines.len() as u16;
+        let footer_spacing = u16::from(inline_selection && height >= 14);
         self.rows_area = Rect::new(
             inner.x,
             rows_y,
             inner.width,
             self.area
                 .bottom()
-                .saturating_sub(if inline_selection { 5 } else { 4 })
+                .saturating_sub(if inline_selection {
+                    5 + 2 * footer_spacing
+                } else {
+                    4
+                })
                 .saturating_sub(rows_y)
                 .min(7),
         );
@@ -1203,8 +1332,14 @@ impl Dialog {
         self.first = self.selected.saturating_sub(visible.saturating_sub(1));
         frame.render_widget(Paragraph::new(lines), inner);
         for (index, (label, detail)) in rows.iter().enumerate().skip(self.first).take(visible) {
-            let selected = index == self.selected;
-            let style = if selected {
+            let separator = matches!(
+                model_rows.get(index),
+                Some(ModelRow::Heading(_) | ModelRow::Spacer)
+            );
+            let selected = index == self.selected && !separator;
+            let style = if separator {
+                Style::default().fg(muted).add_modifier(Modifier::BOLD)
+            } else if selected {
                 theme.selection_style()
             } else {
                 Style::default()
@@ -1350,7 +1485,12 @@ impl Dialog {
             frame.render_widget(
                 Paragraph::new("─".repeat(usize::from(inner.width)))
                     .style(Style::new().fg(palette.border)),
-                Rect::new(inner.x, self.area.bottom() - 5, inner.width, 1),
+                Rect::new(
+                    inner.x,
+                    self.area.bottom() - 5 - footer_spacing,
+                    inner.width,
+                    1,
+                ),
             );
             if matches!(self.page, Page::ModelPicker) {
                 let row = Rect::new(inner.x, self.area.bottom() - 4, inner.width, 1);
@@ -1475,10 +1615,14 @@ impl Dialog {
             let hint = match self.page {
                 Page::ModelPicker if inner.width < 36 => "↑↓ alias · ←→ model",
                 Page::ModelPicker if inner.width < 56 => "↑↓ alias · ←→ model · Enter · Esc",
-                Page::ModelPicker => "↑↓ alias · ←→ model · Enter select · Esc back",
+                Page::ModelPicker => {
+                    "↑↓ alias · ←→ model · Ctrl+Space pin · Alt+↑↓ order · Enter · Esc"
+                }
                 Page::Models { .. } if inner.width < 36 => "↑↓ model · ←→ effort",
                 Page::Models { .. } if inner.width < 56 => "↑↓ model · ←→ effort · Enter · Esc",
-                Page::Models { .. } => "↑↓ model · ←→ effort · Enter select · Esc back",
+                Page::Models { .. } => {
+                    "↑↓ model · ←→ effort · Ctrl+Space pin · Alt+↑↓ order · Enter · Esc"
+                }
                 Page::AliasEntry | Page::AliasEntries => "↑↓ select · Enter choose · Esc back",
                 Page::Priority { .. } => "Enter save · Ctrl+U clear · Esc back",
                 Page::Accounts
@@ -1549,6 +1693,8 @@ impl Dialog {
             editing_alias: String::new(),
             editing_entry: None,
             models: Vec::new(),
+            preferences: config::SelectorPreferences::default(),
+            preferences_error: None,
             connected_providers: Vec::new(),
             thinking_choices: BTreeMap::new(),
             alias_choices: BTreeMap::new(),
@@ -1845,6 +1991,9 @@ impl Dialog {
             }
             Page::ModelPicker => {
                 if let Some((alias, choice)) = self.alias_selection() {
+                    if !self.record_recent(alias.clone(), SelectorKind::Alias) {
+                        return Action::None;
+                    }
                     return Action::SelectAliasChoice { alias, choice };
                 }
                 self.page = Page::Models {
@@ -1914,12 +2063,14 @@ impl Dialog {
             }
             Page::Models { target } => {
                 let selected = self.selected;
-                let choices = self.model_choices();
+                if self.is_model_separator(selected) {
+                    return Action::None;
+                }
                 if let Some(selection) = self.model_selection() {
                     return self.select_model(target.clone(), selection.model, selection.thinking);
                 } else if let Some(provider) = self
                     .connected_providers
-                    .get(selected.saturating_sub(choices.len()))
+                    .get(selected.saturating_sub(self.model_rows().len()))
                 {
                     self.page = Page::Manual {
                         target: target.clone(),
@@ -2013,10 +2164,16 @@ impl Dialog {
         thinking: Option<ThinkingLevel>,
     ) -> Action {
         match target {
-            ModelTarget::Session => Action::SelectModel {
-                model: format!("{}/{}", model.provider, model.id),
-                thinking,
-            },
+            ModelTarget::Session => {
+                let key = format!("{}/{}", model.provider, model.id);
+                if !self.record_recent(key.clone(), SelectorKind::Model) {
+                    return Action::None;
+                }
+                Action::SelectModel {
+                    model: key,
+                    thinking,
+                }
+            }
             ModelTarget::Choice => {
                 let mut entry = self.current_entry().cloned().unwrap_or_else(|| {
                     Alias::new(model.provider.to_string(), model.id.clone(), thinking, 0)
@@ -2082,8 +2239,14 @@ impl Dialog {
 
     fn saved_alias_names(&self) -> Vec<String> {
         let query = self.query.to_lowercase();
-        config::alias_names(&self.aliases)
-            .into_iter()
+        let mut seen = std::collections::BTreeSet::new();
+        self.preferences
+            .alias_pins
+            .iter()
+            .chain(self.preferences.alias_recent.iter())
+            .cloned()
+            .chain(config::alias_names(&self.aliases))
+            .filter(|key| self.aliases.contains_key(key) && seen.insert(key.clone()))
             .filter(|key| {
                 key.to_lowercase().contains(&query)
                     || self.aliases[key].iter().any(|entry| {
@@ -2149,8 +2312,8 @@ impl Dialog {
                 target: ModelTarget::Choice,
             } => {
                 let saved = self.current_entry()?;
-                self.model_choices().iter().position(|model| {
-                    model.id == saved.model && model.provider.to_string() == saved.provider
+                self.model_rows().iter().position(|row| {
+                    matches!(row, ModelRow::Model(model) if model.id == saved.model && model.provider.to_string() == saved.provider)
                 })
             }
             Page::Thinking {
@@ -2166,6 +2329,192 @@ impl Dialog {
                     .position(|level| *level == saved.thinking_level)
             }
             _ => None,
+        }
+    }
+
+    fn model_rows(&self) -> Vec<ModelRow> {
+        let choices = self.model_choices();
+        let mut rows = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for (heading, keys) in [
+            ("Pinned", self.preferences.model_pins.as_slice()),
+            ("Recent", self.preferences.model_recent.as_slice()),
+        ] {
+            let mut section = Vec::new();
+            for key in keys {
+                if let Some(model) = choices
+                    .iter()
+                    .find(|model| format!("{}/{}", model.provider, model.id) == *key)
+                    && seen.insert(key.clone())
+                {
+                    section.push(ModelRow::Model(model.clone()));
+                }
+            }
+            if !section.is_empty() {
+                if !rows.is_empty() {
+                    rows.push(ModelRow::Spacer);
+                }
+                rows.push(ModelRow::Heading(heading.into()));
+                rows.push(ModelRow::Spacer);
+                rows.extend(section);
+            }
+        }
+        let mut providers = PROVIDERS;
+        providers.sort_by_key(ToString::to_string);
+        for provider in providers {
+            let section: Vec<_> = choices
+                .iter()
+                .filter(|model| {
+                    model.provider == provider
+                        && seen.insert(format!("{}/{}", model.provider, model.id))
+                })
+                .map(|model| ModelRow::Model(model.clone()))
+                .collect();
+            if !section.is_empty() {
+                if !rows.is_empty() {
+                    rows.push(ModelRow::Spacer);
+                }
+                rows.push(ModelRow::Heading(provider_heading(provider)));
+                rows.push(ModelRow::Spacer);
+                rows.extend(section);
+            }
+        }
+        rows
+    }
+
+    fn is_model_separator(&self, index: usize) -> bool {
+        matches!(self.page, Page::Models { .. })
+            && self
+                .model_rows()
+                .get(index)
+                .is_some_and(|row| matches!(row, ModelRow::Heading(_) | ModelRow::Spacer))
+    }
+
+    fn normalize_model_focus(&mut self, direction: FocusDirection) {
+        if !matches!(self.page, Page::Models { .. }) {
+            return;
+        }
+        let rows = self.model_rows();
+        let count = rows.len() + self.connected_providers.len();
+        self.selected = self.selected.min(count.saturating_sub(1));
+        let selectable = |index: &usize| {
+            !matches!(
+                rows.get(*index),
+                Some(ModelRow::Heading(_) | ModelRow::Spacer)
+            )
+        };
+        let selected = match direction {
+            FocusDirection::Forward => (self.selected..count).find(selectable),
+            FocusDirection::Backward => (0..=self.selected).rev().find(selectable),
+        };
+        self.selected = selected
+            .or_else(|| (0..count).find(selectable))
+            .unwrap_or(0);
+        debug_assert!(
+            selectable(&self.selected),
+            "selector focus must skip headings and spacing"
+        );
+    }
+
+    fn restore_model_focus(&mut self, key: Option<&str>) {
+        if let Some(key) = key {
+            self.selected = self.model_rows().iter().position(|row| {
+                matches!(row, ModelRow::Model(model) if format!("{}/{}", model.provider, model.id) == key)
+            }).unwrap_or(0);
+        }
+    }
+
+    fn change_pin(&mut self, action: PinAction) {
+        if let Some(error) = &self.preferences_error {
+            self.status = error.clone();
+            return;
+        }
+        let (key, kind) = if let Some((alias, _)) = self.alias_selection() {
+            (alias, SelectorKind::Alias)
+        } else if let Some(selection) = self.model_selection() {
+            (selection.key, SelectorKind::Model)
+        } else {
+            return;
+        };
+        if !matches!(action, PinAction::Toggle) && !self.query.is_empty() {
+            self.status = "Clear the filter to reorder pins.".into();
+            return;
+        }
+        let mut preferences = self.preferences.clone();
+        let pins = match kind {
+            SelectorKind::Alias => &mut preferences.alias_pins,
+            SelectorKind::Model => &mut preferences.model_pins,
+        };
+        match action {
+            PinAction::Toggle => {
+                if pins.contains(&key) {
+                    pins.retain(|pin| pin != &key);
+                } else if pins.len() < 128 {
+                    pins.push(key.clone());
+                } else {
+                    self.status = "At most 128 pins are allowed.".into();
+                    return;
+                }
+            }
+            PinAction::MoveUp | PinAction::MoveDown => {
+                let Some(index) = pins.iter().position(|pin| pin == &key) else {
+                    return;
+                };
+                let destination = if matches!(action, PinAction::MoveUp) {
+                    index.saturating_sub(1)
+                } else {
+                    (index + 1).min(pins.len() - 1)
+                };
+                if destination == index {
+                    return;
+                }
+                pins.swap(index, destination);
+            }
+        }
+        match config::save_selector_preferences(&preferences) {
+            Ok(()) => {
+                self.preferences = preferences;
+                self.status = match action {
+                    PinAction::Toggle => String::new(),
+                    PinAction::MoveUp | PinAction::MoveDown => "Pin order saved.".into(),
+                };
+                match kind {
+                    SelectorKind::Alias => {
+                        self.selected = self
+                            .saved_alias_names()
+                            .iter()
+                            .position(|name| name == &key)
+                            .unwrap_or(0);
+                    }
+                    SelectorKind::Model => self.restore_model_focus(Some(&key)),
+                }
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn record_recent(&mut self, key: String, kind: SelectorKind) -> bool {
+        if let Some(error) = &self.preferences_error {
+            self.status = error.clone();
+            return false;
+        }
+        let mut preferences = self.preferences.clone();
+        let recent = match kind {
+            SelectorKind::Alias => &mut preferences.alias_recent,
+            SelectorKind::Model => &mut preferences.model_recent,
+        };
+        recent.retain(|entry| entry != &key);
+        recent.insert(0, key);
+        recent.truncate(3);
+        match config::save_selector_preferences(&preferences) {
+            Ok(()) => {
+                self.preferences = preferences;
+                true
+            }
+            Err(error) => {
+                self.status = error.to_string();
+                false
+            }
         }
     }
 
@@ -2201,9 +2550,40 @@ impl Dialog {
         }
         let query = self.query.to_lowercase();
         choices.retain(|model| {
-            format!("{} {}", model.id, model.provider)
-                .to_lowercase()
-                .contains(&query)
+            format!(
+                "{} {} {} {}",
+                model.id,
+                model.provider,
+                provider_heading(model.provider),
+                model.display_name.as_deref().unwrap_or_default()
+            )
+            .to_lowercase()
+            .contains(&query)
+        });
+        choices.sort_by(|left, right| {
+            let provider_order = left.provider.to_string().cmp(&right.provider.to_string());
+            if provider_order != std::cmp::Ordering::Equal {
+                return provider_order;
+            }
+            if left.provider == ProviderKind::ChatGpt && right.provider == ProviderKind::ChatGpt {
+                let rank = |model: &Model| {
+                    self.models
+                        .iter()
+                        .position(|known| known.provider == model.provider && known.id == model.id)
+                        .unwrap_or(usize::MAX)
+                };
+                rank(left)
+                    .cmp(&rank(right))
+                    .then_with(|| left.id.cmp(&right.id))
+            } else {
+                crate::catalogue::suggested_model_rank(left.provider, &left.id)
+                    .unwrap_or(usize::MAX)
+                    .cmp(
+                        &crate::catalogue::suggested_model_rank(right.provider, &right.id)
+                            .unwrap_or(usize::MAX),
+                    )
+                    .then_with(|| left.id.cmp(&right.id))
+            }
         });
         choices
     }
@@ -2219,7 +2599,10 @@ impl Dialog {
     fn model_selection(&self) -> Option<ModelSelection> {
         let mut selection = match &self.page {
             Page::Models { target } => {
-                let model = self.model_choices().get(self.selected)?.clone();
+                let model = match self.model_rows().get(self.selected)? {
+                    ModelRow::Model(model) => model.clone(),
+                    ModelRow::Heading(_) | ModelRow::Spacer => return None,
+                };
                 let saved = match target {
                     ModelTarget::Choice => self.current_entry(),
                     ModelTarget::Session => None,
@@ -2447,7 +2830,14 @@ impl Dialog {
                 let mut rows: Vec<_> = self
                     .saved_alias_names()
                     .into_iter()
-                    .map(|key| (key, String::new()))
+                    .map(|key| {
+                        let detail = if self.preferences.alias_pins.contains(&key) {
+                            "★ pinned"
+                        } else {
+                            ""
+                        };
+                        (key, detail.into())
+                    })
                     .collect();
                 rows.push((
                     if self.area.width < 44 {
@@ -2481,13 +2871,15 @@ impl Dialog {
             }
             Page::Models { .. } => {
                 let mut rows: Vec<_> = self
-                    .model_choices()
+                    .model_rows()
                     .into_iter()
-                    .map(|model| {
-                        (
+                    .map(|row| match row {
+                        ModelRow::Model(model) => (
                             model.display_name.unwrap_or(model.id.clone()),
                             format!("{} · {}", model.provider, model.id),
-                        )
+                        ),
+                        ModelRow::Heading(heading) => (heading, String::new()),
+                        ModelRow::Spacer => (String::new(), String::new()),
                     })
                     .collect();
                 rows.extend(
@@ -2528,6 +2920,33 @@ pub(crate) fn thinking_label(level: Option<ThinkingLevel>) -> String {
         Some(ThinkingLevel::Max) => "max",
     }
     .into()
+}
+
+fn provider_heading(provider: ProviderKind) -> String {
+    provider
+        .to_string()
+        .split('-')
+        .map(|word| match word {
+            "openai" => "OpenAI".into(),
+            "chatgpt" => "ChatGPT".into(),
+            "opencode" => "OpenCode".into(),
+            "openrouter" => "OpenRouter".into(),
+            "deepseek" => "DeepSeek".into(),
+            "huggingface" => "Hugging Face".into(),
+            "moonshotai" => "Moonshot AI".into(),
+            "xai" => "xAI".into(),
+            "zai" => "Z AI".into(),
+            "ai" | "cn" | "ams" | "sgp" | "nvidia" => word.to_ascii_uppercase(),
+            _ => {
+                let mut characters = word.chars();
+                match characters.next() {
+                    Some(first) => format!("{}{}", first.to_ascii_uppercase(), characters.as_str()),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn thinking_levels(model: &Model) -> Vec<Option<ThinkingLevel>> {

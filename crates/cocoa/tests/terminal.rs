@@ -1631,6 +1631,214 @@ fn commands_stay_local_and_preserve_history_model_edits_and_onboarding() -> io::
 }
 
 #[test]
+fn model_selector_filters_provider_names_and_groups_models_under_headings() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home(
+        "selector-search",
+        &server.endpoint,
+        true,
+        Some(json!({
+            "medium": [{"provider":"openai","model":"fixture-model","priority":0}],
+            "other": [{"provider":"opencode-go","model":"provider-search-sentinel","priority":0}]
+        })),
+    )?;
+    let path = home.join(".config/cocoa/config.json");
+    let mut configuration = read_json(&path)?;
+    configuration["providers"]["opencode-go"]["credential_env"] = json!("FIXTURE_KEY");
+    fs::write(&path, serde_json::to_vec(&configuration)?)?;
+    let mut session = Terminal::spawn(&home, &[], 110, 36, None)?;
+    session.wait_text(" medium ")?;
+    session.command("/model")?;
+    session.wait_text("Select model")?;
+    session.wait_text("provider-search-sentinel")?;
+    let screen = session.screen();
+    let divider = screen
+        .lines()
+        .position(|line| {
+            let content =
+                line.trim_matches(|character: char| character.is_whitespace() || character == '│');
+            !content.is_empty() && content.chars().all(|character| character == '─')
+        })
+        .ok_or_else(|| io::Error::other(format!("missing footer divider: {screen}")))?;
+    for row in [divider.saturating_sub(1), divider + 1] {
+        let spacing = screen
+            .lines()
+            .nth(row)
+            .ok_or_else(|| io::Error::other("missing footer spacing"))?;
+        assert!(
+            spacing
+                .trim_matches(|character: char| character.is_whitespace() || character == '│')
+                .is_empty(),
+            "footer divider needs spacing above and below: {screen}"
+        );
+    }
+    for (provider, model) in [
+        ("OpenCode Go", "provider-search-sentinel"),
+        ("OpenAI", "fixture-model"),
+    ] {
+        let heading = screen
+            .lines()
+            .position(|line| {
+                line.trim_matches(|character: char| character.is_whitespace() || character == '│')
+                    == provider
+            })
+            .ok_or_else(|| io::Error::other(format!("missing {provider} heading: {screen}")))?;
+        let spacing_above = screen
+            .lines()
+            .nth(heading.saturating_sub(1))
+            .ok_or_else(|| io::Error::other("missing spacing above heading"))?;
+        assert!(
+            spacing_above
+                .trim_matches(|character: char| character.is_whitespace() || character == '│')
+                .is_empty(),
+            "headings need a blank line above: {screen}"
+        );
+        let model_row = screen
+            .lines()
+            .position(|line| line.contains(model))
+            .ok_or_else(|| io::Error::other(format!("missing {model}: {screen}")))?;
+        assert_eq!(
+            model_row,
+            heading + 2,
+            "models need a blank line after the heading: {screen}"
+        );
+        let spacing = screen
+            .lines()
+            .nth(heading + 1)
+            .ok_or_else(|| io::Error::other("missing heading spacing"))?;
+        assert!(
+            spacing
+                .trim_matches(|character: char| character.is_whitespace() || character == '│')
+                .is_empty(),
+            "{screen}"
+        );
+    }
+    session.key(b"\x1b[B")?;
+    session.until(|session| {
+        session
+            .screen()
+            .lines()
+            .any(|line| line.contains("› provider-search-sentinel"))
+    })?;
+    session.key(b"\x10")?;
+    session.until(|session| {
+        session
+            .screen()
+            .lines()
+            .any(|line| line.contains("› fixture-model"))
+    })?;
+    session.text("oPeNcOdE gO")?;
+    session.until(|session| {
+        session.screen().contains("provider-search-sentinel")
+            && !session.screen().contains("fixture-model")
+    })?;
+    session.key(b"\x1b[H\x1b[A\r")?;
+    session.until(|session| !session.screen().contains("Select model"))?;
+    session.wait_text("provider-search-sentinel")?;
+    assert!(server.requests()?.is_empty());
+    close_command_session(&mut session)?;
+    server.finish()
+}
+
+#[test]
+fn model_selector_pins_reorders_unpins_and_remembers_recent_selections() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home(
+        "selector-pins",
+        &server.endpoint,
+        true,
+        Some(json!({
+            "medium": [{"provider":"openai","model":"fixture-model","priority":0}],
+            "other": [{"provider":"openai","model":"second-model","priority":0}]
+        })),
+    )?;
+    let configuration_path = home.join(".config/cocoa/config.json");
+    let original = fs::read(&configuration_path)?;
+    let preferences_path = home.join(".config/cocoa/selector.json");
+    let mut session = Terminal::spawn(&home, &[], 110, 36, None)?;
+    session.wait_text(" medium ")?;
+    for (model, expected) in [
+        ("fixture-model", json!(["openai/fixture-model"])),
+        (
+            "second-model",
+            json!(["openai/fixture-model", "openai/second-model"]),
+        ),
+    ] {
+        session.command("/model")?;
+        session.wait_text("Select model")?;
+        session.text(model)?;
+        session.key(b"\0")?;
+        session.until(|_| {
+            read_json(&preferences_path).is_ok_and(|value| value["model_pins"] == expected)
+        })?;
+        session.wait_text("Pinned")?;
+        assert!(
+            !session.screen().contains("Pinned."),
+            "pinning should not show a status message"
+        );
+        session.key(b"\x1b")?;
+        session.until(|session| !session.screen().contains("Select model"))?;
+    }
+    session.command("/model")?;
+    session.wait_text("Pinned")?;
+    session.key(b"\x1b[H\x1b[1;3B")?;
+    session.until(|_| {
+        read_json(&preferences_path).is_ok_and(|value| {
+            value["model_pins"] == json!(["openai/second-model", "openai/fixture-model"])
+        })
+    })?;
+    session.key(b"\x1b")?;
+    session.until(|session| !session.screen().contains("Select model"))?;
+    close_command_session(&mut session)?;
+    let mut session = Terminal::spawn(&home, &[], 110, 36, None)?;
+    session.wait_text(" medium ")?;
+    session.command("/model")?;
+    session.wait_text("Pinned")?;
+    let screen = session.screen();
+    let second = screen
+        .find("second-model")
+        .ok_or_else(|| io::Error::other("missing second pin"))?;
+    let first = screen
+        .find("fixture-model")
+        .ok_or_else(|| io::Error::other("missing first pin"))?;
+    assert!(second < first, "pin order lost after restart: {screen}");
+    session.key(b"\x1b[H\0")?;
+    session.until(|_| {
+        read_json(&preferences_path)
+            .is_ok_and(|value| value["model_pins"] == json!(["openai/fixture-model"]))
+    })?;
+    assert!(
+        !session.screen().contains("Unpinned."),
+        "unpinning should not show a status message"
+    );
+    session.key(b"\r")?;
+    session.until(|session| !session.screen().contains("Select model"))?;
+    session.until(|_| {
+        read_json(&preferences_path)
+            .is_ok_and(|value| value["model_recent"] == json!(["openai/second-model"]))
+    })?;
+    session.command("/model")?;
+    session.wait_text("Recent")?;
+    let screen = session.screen();
+    assert_eq!(
+        screen
+            .lines()
+            .filter(|line| line.contains("second-model"))
+            .count(),
+        1,
+        "{screen}"
+    );
+    session.key(b"\x1b")?;
+    session.until(|session| !session.screen().contains("Select model"))?;
+    assert_eq!(fs::read(&configuration_path)?, original);
+    assert!(server.requests()?.is_empty());
+    close_command_session(&mut session)?;
+    server.finish()
+}
+
+#[test]
 fn model_commands_pick_catalogue_and_manual_models_without_saving() -> io::Result<()> {
     let root = Homes::new()?;
     let server = Provider::start(ProviderKind::Commands)?;

@@ -90,53 +90,21 @@ impl Efforts {
     }
 }
 
+/// Curated preference within a provider, or absence for an unranked model.
+/// Uses the same model identifiers as the onboarding suggestions, not usage telemetry.
+#[must_use]
+pub fn suggested_model_rank(provider: ProviderKind, id: &str) -> Option<usize> {
+    suggested_model_groups(provider)
+        .into_iter()
+        .flatten()
+        .position(|candidate| *candidate == id)
+}
+
 impl Catalogue {
     /// Suggest known coding models that the selected catalogue actually advertised.
     /// Missing model groups reuse another known group; unknown models require a choice.
     pub fn suggested_aliases(&self, provider: ProviderKind) -> Vec<crate::config::AliasSuggestion> {
-        let groups: [&[&str]; 3] = match provider {
-            ProviderKind::OpenAi | ProviderKind::ChatGpt => [
-                &["gpt-6-luna", "gpt-5-mini", "gpt-5-nano"],
-                &["gpt-6.1-sol", "gpt-6-sol", "gpt-5"],
-                &["gpt-6-astra", "gpt-6.1-sol", "gpt-5"],
-            ],
-            ProviderKind::OpenCodeGo => [
-                &["glm-5.3-flash", "glm-4.7-flash"],
-                &["kimi-k2.7-code", "glm-5.3", "minimax-m3"],
-                &["kimi-k3", "glm-5.3", "kimi-k2.7-code"],
-            ],
-            ProviderKind::Baseten => [
-                &["zai-org/GLM-5.3"],
-                &["zai-org/GLM-5.3"],
-                &["zai-org/GLM-5.3"],
-            ],
-            ProviderKind::OpenRouter => [
-                &["openai/gpt-6-luna", "openai/gpt-5-mini"],
-                &["openai/gpt-6.1-sol", "openai/gpt-5"],
-                &["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-5"],
-            ],
-            ProviderKind::Ollama => [
-                &[
-                    "qwen3-coder:30b",
-                    "qwen3-coder:latest",
-                    "llama3.1:8b",
-                    "llama3.1:latest",
-                ],
-                &[
-                    "qwen3-coder:30b",
-                    "qwen3-coder:latest",
-                    "llama3.1:8b",
-                    "llama3.1:latest",
-                ],
-                &[
-                    "qwen3-coder:30b",
-                    "qwen3-coder:latest",
-                    "llama3.1:8b",
-                    "llama3.1:latest",
-                ],
-            ],
-            _ => return Vec::new(),
-        };
+        let groups = suggested_model_groups(provider);
         let choices = groups.map(|ids| {
             ids.iter().find_map(|id| {
                 self.models
@@ -667,6 +635,52 @@ async fn discover_provider_checked(
     };
     let value = fetch_checked(url, key, 4 * 1024 * 1024).await?;
     parse_models(kind, &value)
+}
+
+fn suggested_model_groups(provider: ProviderKind) -> [&'static [&'static str]; 3] {
+    match provider {
+        ProviderKind::OpenAi | ProviderKind::ChatGpt => [
+            &["gpt-6-luna", "gpt-5-mini", "gpt-5-nano"],
+            &["gpt-6.1-sol", "gpt-6-sol", "gpt-5"],
+            &["gpt-6-astra", "gpt-6.1-sol", "gpt-5"],
+        ],
+        ProviderKind::OpenCodeGo => [
+            &["glm-5.3-flash", "glm-4.7-flash"],
+            &["kimi-k2.7-code", "glm-5.3", "minimax-m3"],
+            &["kimi-k3", "glm-5.3", "kimi-k2.7-code"],
+        ],
+        ProviderKind::Baseten => [
+            &["zai-org/GLM-5.3"],
+            &["zai-org/GLM-5.3"],
+            &["zai-org/GLM-5.3"],
+        ],
+        ProviderKind::OpenRouter => [
+            &["openai/gpt-6-luna", "openai/gpt-5-mini"],
+            &["openai/gpt-6.1-sol", "openai/gpt-5"],
+            &["openai/gpt-6-astra", "openai/gpt-6.1-sol", "openai/gpt-5"],
+        ],
+        ProviderKind::Ollama => [
+            &[
+                "qwen3-coder:30b",
+                "qwen3-coder:latest",
+                "llama3.1:8b",
+                "llama3.1:latest",
+            ],
+            &[
+                "qwen3-coder:30b",
+                "qwen3-coder:latest",
+                "llama3.1:8b",
+                "llama3.1:latest",
+            ],
+            &[
+                "qwen3-coder:30b",
+                "qwen3-coder:latest",
+                "llama3.1:8b",
+                "llama3.1:latest",
+            ],
+        ],
+        _ => [&[]; 3],
+    }
 }
 
 fn parse_chatgpt(value: &Value) -> Result<Vec<Model>, ConnectError> {

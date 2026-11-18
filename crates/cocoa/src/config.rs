@@ -946,6 +946,77 @@ pub fn load_selection(
     }
 }
 
+/// Local model-selector ordering, independent of active and default selections.
+/// Model keys use `provider/model`; alias keys use saved alias names.
+/// Pins are stored in display order and recent choices in most-recent-first order.
+///
+/// Loading and saving validate at most 128 pins and three recent choices per kind.
+/// Entries must be unique within each list, nonblank and free of control characters.
+/// Model keys allow at most 512 bytes, alias keys 64 bytes, and serialized state 65,536 bytes.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SelectorPreferences {
+    pub model_pins: Vec<String>,
+    pub model_recent: Vec<String>,
+    pub alias_pins: Vec<String>,
+    pub alias_recent: Vec<String>,
+}
+
+/// Load local ordering preferences, returning empty lists when no file exists.
+///
+/// # Errors
+/// Reject unreadable, malformed, oversized or out-of-bounds preferences.
+pub fn selector_preferences() -> Result<SelectorPreferences, ConfigError> {
+    let path = std::env::home_dir()
+        .ok_or(ConfigError::File)?
+        .join(".config/cocoa/selector.json");
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SelectorPreferences::default());
+        }
+        Err(_) => return Err(ConfigError::File),
+    };
+    let mut bytes = Vec::new();
+    file.take(65_537)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ConfigError::File)?;
+    if bytes.len() > 65_536 {
+        return Err(ConfigError::FileLimit);
+    }
+    let preferences: SelectorPreferences =
+        serde_json::from_slice(&bytes).map_err(|_| ConfigError::Json)?;
+    validate_selector_preferences(&preferences)?;
+    Ok(preferences)
+}
+
+/// Atomically replace local ordering preferences without changing configured models.
+///
+/// # Errors
+/// Reject invalid bounds, unavailable home directories or failed persistence.
+pub fn save_selector_preferences(preferences: &SelectorPreferences) -> Result<(), ConfigError> {
+    use std::io::Write;
+    validate_selector_preferences(preferences)?;
+    let path = std::env::home_dir()
+        .ok_or(ConfigError::Save)?
+        .join(".config/cocoa/selector.json");
+    let parent = path.parent().ok_or(ConfigError::Save)?;
+    std::fs::create_dir_all(parent).map_err(|_| ConfigError::Save)?;
+    let bytes = serde_json::to_vec(preferences).map_err(|_| ConfigError::Save)?;
+    if bytes.len() > 65_536 {
+        return Err(ConfigError::FileLimit);
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|_| ConfigError::Save)?;
+    temporary
+        .write_all(&bytes)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|_| ConfigError::Save)?;
+    temporary.persist(&path).map_err(|_| ConfigError::Save)?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| ConfigError::Sync)
+}
+
 /// Persist the resolved interactive selection separately from configured defaults.
 /// Uses the original alias choice and provider configuration captured during resolution.
 /// Does not reread settings, resolve credentials or serialize secrets.
@@ -2004,6 +2075,29 @@ struct RememberedSelection {
     provider: String,
     model: String,
     thinking: Option<ThinkingLevel>,
+}
+
+fn validate_selector_preferences(preferences: &SelectorPreferences) -> Result<(), ConfigError> {
+    for (entries, count_max, length_max) in [
+        (&preferences.model_pins, 128, 512),
+        (&preferences.model_recent, 3, 512),
+        (&preferences.alias_pins, 128, 64),
+        (&preferences.alias_recent, 3, 64),
+    ] {
+        if entries.len() > count_max {
+            return Err(ConfigError::Bounds);
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            if entry.trim().is_empty()
+                || entry.len() > length_max
+                || entry.chars().any(char::is_control)
+                || entries[..index].contains(entry)
+            {
+                return Err(ConfigError::Bounds);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn selection_path() -> Option<PathBuf> {

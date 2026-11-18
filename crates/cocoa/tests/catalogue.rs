@@ -10,6 +10,55 @@ use cocoa_llm::{ModelLimits, ProviderKind};
 use serde_json::{Value, json};
 
 #[test]
+fn curated_model_ranking_uses_provider_specific_suggestions() {
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenAi, "gpt-6-luna"),
+        Some(0)
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenAi, "gpt-5-mini"),
+        Some(1)
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenAi, "gpt-6.1-sol"),
+        Some(3),
+        "a repeated identifier keeps its first rank"
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenAi, "gpt-6-astra"),
+        Some(6)
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenCodeGo, "kimi-k2.7-code"),
+        Some(2)
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::Baseten, "zai-org/GLM-5.3"),
+        Some(0)
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::Ollama, "qwen3-coder:latest"),
+        Some(1)
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenAi, "unranked-model"),
+        None
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenRouter, "openai/gpt-6-luna"),
+        Some(0)
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::OpenAi, "openai/gpt-6-luna"),
+        None
+    );
+    assert_eq!(
+        catalogue::suggested_model_rank(ProviderKind::Anthropic, "unranked-model"),
+        None
+    );
+}
+
+#[test]
 fn catalogue_discovery_parses_provider_limits_and_scopes_headers() -> Result<(), Box<dyn Error>> {
     let client = reqwest::Client::builder().no_proxy().build()?;
     for (kind, body, context_tokens, output_tokens) in [

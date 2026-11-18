@@ -1,9 +1,135 @@
 //! Remembered startup selection stays separate from user configuration.
 
-use cocoa::config::{self, ConfigError, Selection};
+use cocoa::config::{self, ConfigError, Selection, SelectorPreferences};
 use cocoa_llm::ThinkingLevel;
 use serde_json::json;
 use std::{error::Error, fs, process::Command};
+
+#[test]
+fn selector_preferences() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let output = Command::new(std::env::current_exe()?)
+        .args(["--exact", "selector_preferences_child", "--nocapture"])
+        .env("HOME", home.path())
+        .env("COCOA_SELECTOR_TEST", "1")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn selector_preferences_child() -> Result<(), Box<dyn Error>> {
+    if std::env::var_os("COCOA_SELECTOR_TEST").is_none() {
+        return Ok(());
+    }
+    let home = std::env::home_dir().ok_or("missing test home")?;
+    let directory = home.join(".config/cocoa");
+    let path = directory.join("selector.json");
+    assert_eq!(
+        config::selector_preferences()?,
+        SelectorPreferences::default()
+    );
+    assert!(!path.exists());
+    fs::create_dir_all(&directory)?;
+    let configuration_path = directory.join("config.json");
+    fs::write(&configuration_path, b"configuration sentinel")?;
+    let preferences = SelectorPreferences {
+        model_pins: vec!["openai/z-last".into(), "openai/a-first".into()],
+        model_recent: vec!["openai/recent".into()],
+        alias_pins: vec!["work".into(), "fast".into()],
+        alias_recent: vec!["fast".into(), "work".into()],
+    };
+    config::save_selector_preferences(&preferences)?;
+    assert_eq!(config::selector_preferences()?, preferences);
+    for valid in [
+        SelectorPreferences {
+            model_pins: (0..128).map(|index| format!("openai/{index}")).collect(),
+            alias_pins: (0..128).map(|index| format!("alias-{index}")).collect(),
+            ..Default::default()
+        },
+        SelectorPreferences {
+            model_pins: vec!["x".repeat(512)],
+            alias_pins: vec!["x".repeat(64)],
+            model_recent: (0..3).map(|index| format!("openai/{index}")).collect(),
+            alias_recent: (0..3).map(|index| format!("alias-{index}")).collect(),
+        },
+    ] {
+        config::save_selector_preferences(&valid)?;
+        assert_eq!(config::selector_preferences()?, valid);
+    }
+    config::save_selector_preferences(&preferences)?;
+    let original = fs::read(&path)?;
+    for invalid in [
+        SelectorPreferences {
+            model_pins: vec!["same".into(); 2],
+            ..Default::default()
+        },
+        SelectorPreferences {
+            model_pins: vec!["x".repeat(513)],
+            ..Default::default()
+        },
+        SelectorPreferences {
+            alias_pins: vec!["x".repeat(65)],
+            ..Default::default()
+        },
+        SelectorPreferences {
+            alias_pins: vec![String::new()],
+            ..Default::default()
+        },
+        SelectorPreferences {
+            alias_pins: vec!["   ".into()],
+            ..Default::default()
+        },
+        SelectorPreferences {
+            alias_pins: (0..129).map(|index| format!("alias-{index}")).collect(),
+            ..Default::default()
+        },
+        SelectorPreferences {
+            alias_pins: vec!["bad\nname".into()],
+            ..Default::default()
+        },
+        SelectorPreferences {
+            model_pins: (0..129).map(|index| format!("openai/{index}")).collect(),
+            ..Default::default()
+        },
+        SelectorPreferences {
+            model_recent: (0..4).map(|index| format!("openai/{index}")).collect(),
+            ..Default::default()
+        },
+        SelectorPreferences {
+            alias_recent: (0..4).map(|index| format!("alias-{index}")).collect(),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            config::save_selector_preferences(&invalid).is_err(),
+            "{invalid:?}"
+        );
+        assert_eq!(fs::read(&path)?, original);
+        fs::write(&path, serde_json::to_vec(&invalid)?)?;
+        assert!(config::selector_preferences().is_err(), "{invalid:?}");
+        fs::write(&path, &original)?;
+    }
+    fs::write(&path, br#"{"alias_pins":["work"]}"#)?;
+    assert_eq!(
+        config::selector_preferences()?,
+        SelectorPreferences {
+            alias_pins: vec!["work".into()],
+            ..Default::default()
+        }
+    );
+    fs::write(&path, b"not JSON")?;
+    assert!(config::selector_preferences().is_err());
+    fs::write(&path, vec![b' '; 128 * 1024])?;
+    assert!(config::selector_preferences().is_err());
+    assert_eq!(fs::read(&configuration_path)?, b"configuration sentinel");
+    Ok(())
+}
 
 #[test]
 fn remembered_selection() -> Result<(), Box<dyn Error>> {

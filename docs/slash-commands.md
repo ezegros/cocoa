@@ -26,6 +26,12 @@ Type `/` in chat to browse commands. Enter completes a partial command; Enter on
 
 Selecting an alias by name starts with its first regular choice. The `/models` alias picker shows alias names without a first-model detail. Left/right selects among the highlighted alias's saved regular choices without changing their saved effort. The separate provider model browser still uses left/right to change effort for direct selections. Use `/aliases` to edit saved effort or toggle fallback-only status for each model. `/alias` is not a command.
 
+The model selector puts pinned choices first, then up to three recent choices. The provider model browser groups the remaining models by provider. Each choice appears once. Provider sections are alphabetical. Within each provider, known onboarding suggestions come first, followed by unranked models alphabetically; ChatGPT keeps its discovered model ranking. This is a curated order, not measured popularity. Alias lists keep the remaining aliases alphabetical because an alias can span providers. Pins affect navigation only, not the active model, defaults, saved effort or fallback order.
+
+Use Ctrl+Space to pin or unpin the highlighted alias or model. New pins go at the end. With a pin highlighted, use Alt+Up or Alt+Down to change its position. Pin order persists across restarts. Reordering is disabled while filtering; clear the filter first. Filtering in the provider model browser matches provider names, model IDs and display names without case sensitivity. Empty groups disappear.
+
+Selector preferences live in ~/.config/cocoa/selector.json, separately from model configuration. Recent choices update when you confirm a selection, not when you browse or when a model falls back automatically.
+
 Before the conversation starts, Ctrl+T cycles regular choices within the current alias. Fallback-only choices are not selectable in the alias picker or that cycle. See [model aliases](configuration.md#model-aliases) for priority ordering and [startup fallback](configuration.md#startup-fallback) for when Cocoa can try another choice. A direct model accepts an optional effort level; `default` uses the provider default. Alias selection uses the saved effort and cannot take a level override.
 
 `/rewind` requires idle work with no active child agents. Up and Down select a prompt, Enter forks, and Esc cancels. The original session is preserved. Files are unchanged, JavaScript bindings and handles reset, and shared context and child agents are not copied. A nonempty draft requires confirmation before replacement.
