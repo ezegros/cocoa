@@ -2934,6 +2934,8 @@ impl Chat {
                 let selected = self.activity_focus == Some(activity.key) && expandable;
                 let style = if selected {
                     theme.selection_style()
+                } else if matches!(activity.key.kind, ActivityKind::Work | ActivityKind::Agent) {
+                    Style::new().fg(palette.foreground)
                 } else {
                     Style::new().fg(palette.muted)
                 };
@@ -3295,9 +3297,16 @@ impl Activity {
     ) -> Line<'static> {
         let palette = theme.palette();
         let working = self.state.is_running() || running_children;
-        let indicator = if matches!(self.key.kind, ActivityKind::Work | ActivityKind::Agent)
-            && self.provider_notice.is_none()
-        {
+        let parent = matches!(self.key.kind, ActivityKind::Work | ActivityKind::Agent);
+        let completed = parent
+            && !working
+            && matches!(
+                self.state,
+                ActivityState::Finished(ActivityStatus::Completed)
+            );
+        let indicator = if completed {
+            "✓"
+        } else if parent && self.provider_notice.is_none() {
             work_indicator(width, loader.filter(|_| working))
         } else {
             ""
@@ -3307,7 +3316,13 @@ impl Activity {
         } else {
             format!("{indicator} ")
         };
-        let padding_width = indicator.len() as u16 + 2;
+        let indicator_color = if completed {
+            palette.success
+        } else {
+            palette.accent
+        };
+        let indicator = Span::styled(indicator, Style::new().fg(indicator_color));
+        let padding_width = indicator.width() as u16 + 2;
         let mut title = match self.key.kind {
             ActivityKind::Work if working => decorative.to_owned(),
             ActivityKind::Work => "Work Done".to_owned(),
@@ -3423,7 +3438,7 @@ impl Activity {
             Style::default()
         };
         let mut spans = vec![
-            Span::styled(indicator, Style::new().fg(palette.accent)),
+            indicator,
             Span::styled(title, title_style),
             Span::styled(status_label, title_style),
         ];

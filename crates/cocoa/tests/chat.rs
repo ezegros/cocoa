@@ -241,6 +241,7 @@ fn working_starts_expanded_and_collapses_on_completion() -> Result<(), Box<dyn E
     chat.input(key(KeyCode::Tab, KeyModifiers::NONE));
     let expanded = render(&mut chat, 64, 24)?;
     assert!(expanded.contains("Toasting ▾"), "{expanded}");
+    assert!(!expanded.contains("✓"), "{expanded}");
     assert!(expanded.contains("Reading file"), "{expanded}");
     chat.input(key(KeyCode::Left, KeyModifiers::NONE));
     let collapsed = render(&mut chat, 64, 24)?;
@@ -249,11 +250,22 @@ fn working_starts_expanded_and_collapses_on_completion() -> Result<(), Box<dyn E
     chat.input(key(KeyCode::Right, KeyModifiers::NONE));
     chat.complete("Done");
     let completed = render(&mut chat, 64, 24)?;
-    assert!(completed.contains("Work Done ▸"), "{completed}");
+    assert!(completed.contains("✓ Work Done ▸"), "{completed}");
+    let mut terminal = Terminal::new(TestBackend::new(64, 24))?;
+    terminal.draw(|frame| chat.render(frame))?;
+    let buffer = terminal.backend().buffer();
+    let tick = buffer.content.iter().position(|cell| cell.symbol() == "✓");
+    let tick = tick.ok_or("missing completion tick")?;
+    assert_eq!(buffer.content[tick].fg, chat.theme().palette().success);
+    assert_eq!(buffer.content[tick + 2].symbol(), "W");
+    assert_eq!(
+        buffer.content[tick + 2].fg,
+        chat.theme().palette().foreground
+    );
     assert!(!completed.contains("Reading file"), "{completed}");
     chat.input(key(KeyCode::Right, KeyModifiers::NONE));
     let reopened = render(&mut chat, 64, 24)?;
-    assert!(reopened.contains("Work Done ▾"), "{reopened}");
+    assert!(reopened.contains("✓ Work Done ▾"), "{reopened}");
     assert!(reopened.contains("Read file"), "{reopened}");
     Ok(())
 }
@@ -4584,7 +4596,7 @@ fn pod_press_keeps_its_timing_and_fixed_group_slot_and_stops_on_completion()
     });
     let settled_agent = render(&mut chat, 40, 16)?;
     assert!(
-        settled_agent.contains("Peer Agent Worked ▸"),
+        settled_agent.contains("✓ Peer Agent Worked ▸"),
         "{settled_agent}"
     );
     chat.complete("finished");
@@ -4595,7 +4607,7 @@ fn pod_press_keeps_its_timing_and_fixed_group_slot_and_stops_on_completion()
     }
     assert_eq!(
         completed.lines().find_map(|line| line.find("Work Done")),
-        Some(2),
+        Some(6),
         "{completed}"
     );
     assert_eq!(completed, render(&mut chat, 40, 16)?);
@@ -4605,7 +4617,7 @@ fn pod_press_keeps_its_timing_and_fixed_group_slot_and_stops_on_completion()
             .lines()
             .find(|line| line.contains("Work Done"))
             .ok_or("missing completed work")?;
-        assert_eq!(header.find("Work Done"), Some(2), "{view}");
+        assert_eq!(header.find("Work Done"), Some(6), "{view}");
         let title = view
             .lines()
             .find(|line| line.starts_with('╭'))
