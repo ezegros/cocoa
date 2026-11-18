@@ -2008,6 +2008,71 @@ fn mouse_disclosure_and_stopped_keyboard_navigation_preserve_long_details()
     Ok(())
 }
 
+#[test]
+fn repeated_activity_clicks_keep_long_details_and_groups_reachable() -> Result<(), Box<dyn Error>> {
+    for phase in ["running", "completed", "stopped"] {
+        for line_count in [2, 48] {
+            let mut chat = Chat::new(128)?;
+            chat.initial_prompt("Inspect the project")?;
+            observe_root_event(
+                &mut chat,
+                EventKind::CapabilityInput {
+                    operation: OperationId(1),
+                    title: "Inspect file".into(),
+                    text: "detail line\n".repeat(line_count),
+                    summary: None,
+                    truncated: false,
+                },
+            );
+            type_text(&mut chat, "next draft");
+            match phase {
+                "completed" => chat.complete("Inspection finished."),
+                "stopped" => chat.fail("Inspection stopped."),
+                _ => {}
+            }
+            if phase != "running" {
+                click_activity(&mut chat, "Work Done")?;
+            }
+            let view = render(&mut chat, 64, 20)?;
+            let row = view
+                .lines()
+                .position(|line| line.contains("Inspect file"))
+                .ok_or("missing file activity")? as u16;
+            for expanded in [true, false, true] {
+                chat.input(mouse(MouseEventKind::Down(MouseButton::Left), (10, row)));
+                chat.input(mouse(MouseEventKind::Up(MouseButton::Left), (10, row)));
+                let view = render(&mut chat, 64, 20)?;
+                let header = view.lines().nth(usize::from(row)).ok_or("missing row")?;
+                assert!(header.contains("Inspect file"), "{phase}: {view}");
+                assert_eq!(header.contains('▾'), expanded, "{phase}: {view}");
+                assert_eq!(view.contains("detail line"), expanded, "{phase}: {view}");
+                assert!(view.contains("next draft"), "{phase}: {view}");
+            }
+            let title = if phase == "running" {
+                "Toasting"
+            } else {
+                "Work Done"
+            };
+            let view = render(&mut chat, 64, 20)?;
+            let row = view
+                .lines()
+                .position(|line| line.contains(title))
+                .ok_or("missing work group")? as u16;
+            for expanded in [false, true, false, true] {
+                chat.input(mouse(MouseEventKind::Down(MouseButton::Left), (10, row)));
+                chat.input(mouse(MouseEventKind::Up(MouseButton::Left), (10, row)));
+                let view = render(&mut chat, 64, 20)?;
+                let header = view.lines().nth(usize::from(row)).ok_or("missing row")?;
+                assert!(header.contains(title), "{phase}: {view}");
+                assert_eq!(header.contains('▾'), expanded, "{phase}: {view}");
+                assert_eq!(view.contains("Inspect file"), expanded, "{phase}: {view}");
+                assert_eq!(view.contains("detail line"), expanded, "{phase}: {view}");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Output arrives between frames while an agent streams; the header the user
 /// sees on screen must still toggle when clicked.
 #[test]

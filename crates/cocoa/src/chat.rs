@@ -210,7 +210,7 @@ pub struct Chat {
     hidden_wait_operations: BTreeSet<(Option<usize>, u64, OperationId)>,
     agents: Vec<AgentActivity>,
     activity_focus: Option<ActivityKey>,
-    reveal_focus: bool,
+    activity_reveal: Option<ActivityReveal>,
     /// Click targets from the last drawn frame. Observations only rewrite the
     /// transcript, so they must not drop rows the screen still shows; a click
     /// during streaming would otherwise land on nothing.
@@ -278,7 +278,7 @@ impl Chat {
             hidden_wait_operations: BTreeSet::new(),
             agents: Vec::new(),
             activity_focus: None,
-            reveal_focus: false,
+            activity_reveal: None,
             headers: Vec::new(),
             popup: Rect::default(),
             composer_area: Rect::default(),
@@ -1127,7 +1127,7 @@ impl Chat {
         self.agents.clear();
         self.hidden_wait_operations.clear();
         self.activity_focus = None;
-        self.reveal_focus = false;
+        self.activity_reveal = None;
         self.headers.clear();
         self.selection.invalidate();
         self.invocation = None;
@@ -1406,7 +1406,7 @@ impl Chat {
         } else if !self.input_notice.is_empty() {
             self.input_notice.as_str()
         } else if self.activity_focus.is_some() {
-            "↑/↓ select · → expand · ← collapse · Esc prompt"
+            "↑/↓ select · Enter toggle · ←/→ fold · Esc prompt"
         } else {
             ""
         };
@@ -1747,13 +1747,15 @@ impl Chat {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left)
                 && !self.popup.contains((mouse.column, mouse.row).into())
             {
-                if let Some((key, _)) = self
+                if let Some((key, area)) = self
                     .headers
                     .iter()
                     .find(|(_, area)| area.contains((mouse.column, mouse.row).into()))
                 {
                     let key = *key;
+                    let row = area.y;
                     self.toggle_activity(key, None);
+                    self.activity_reveal = Some(ActivityReveal::Anchor { key, row });
                     return Action::Redraw;
                 }
                 if self
@@ -1780,7 +1782,7 @@ impl Chat {
                 MouseEventKind::ScrollDown => self.scroll.saturating_sub(3),
                 _ => return self.selection.mouse(mouse, now),
             };
-            self.reveal_focus = false;
+            self.activity_reveal = None;
             self.selection.invalidate();
             self.headers.clear();
             return Action::Redraw;
@@ -1831,7 +1833,7 @@ impl Chat {
             } else {
                 self.scroll.saturating_sub(5)
             };
-            self.reveal_focus = false;
+            self.activity_reveal = None;
             return Action::Redraw;
         }
         let alias_previous = key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::SHIFT);
@@ -2499,7 +2501,7 @@ impl Chat {
             } else {
                 self.activity_keys().last().copied()
             };
-            self.reveal_focus = true;
+            self.activity_reveal = Some(ActivityReveal::Focus);
             return Some(Action::Redraw);
         }
         let focus = self.activity_focus?;
@@ -2519,7 +2521,7 @@ impl Chat {
                         };
                         self.activity_focus = Some(keys[index]);
                         self.reset_gestures();
-                        self.reveal_focus = true;
+                        self.activity_reveal = Some(ActivityReveal::Focus);
                     }
                 }
                 KeyCode::Right => self.toggle_activity(focus, Some(true)),
@@ -2552,7 +2554,7 @@ impl Chat {
         {
             self.activity_focus = Some(key);
         }
-        self.reveal_focus = true;
+        self.activity_reveal = Some(ActivityReveal::Focus);
         self.headers.clear();
         self.selection.invalidate();
     }
@@ -2965,13 +2967,8 @@ impl Chat {
                         &message.text
                     };
                     let file_diff = activity.output == Some(ActivityOutputKind::Diff);
-                    let inset = (indent + if file_diff { 2 } else { 0 }).min(area.width);
-                    let padding = Padding::new(
-                        if file_diff { 0 } else { 2.min(area.width) },
-                        0,
-                        u16::from(file_diff),
-                        u16::from(file_diff),
-                    );
+                    let inset = (indent + 2).min(area.width);
+                    let padding = Padding::new(0, 0, 1, 1);
                     let (body, text) = if matches!(activity.key.kind, ActivityKind::AgentAnswer) {
                         let rendered = message.markdown.render(
                             text,
@@ -2993,11 +2990,7 @@ impl Chat {
                         message.layout.height() + usize::from(padding.top + padding.bottom);
                     paragraphs.push(TranscriptPart {
                         body,
-                        style: if file_diff {
-                            Style::new().bg(palette.surface)
-                        } else {
-                            Style::new().fg(palette.foreground)
-                        },
+                        style: Style::new().fg(palette.foreground).bg(palette.surface),
                         height,
                         inset,
                         padding,
@@ -3096,11 +3089,19 @@ impl Chat {
         let maximum = height.saturating_sub(usize::from(area.height));
         self.scroll = self.scroll.min(maximum);
         let mut offset = maximum.saturating_sub(self.scroll);
-        if self.reveal_focus {
-            let mut top = 0;
+        if let Some(reveal) = self.activity_reveal.take() {
+            let key = match reveal {
+                ActivityReveal::Focus => self.activity_focus,
+                ActivityReveal::Anchor { key, .. } => Some(key),
+            };
+            let mut top = 0usize;
             for part in &paragraphs {
-                if part.header.is_some() && part.header == self.activity_focus {
-                    if top < offset {
+                if part.header.is_some() && part.header == key {
+                    if let ActivityReveal::Anchor { row, .. } = reveal {
+                        offset = top
+                            .saturating_sub(usize::from(row.saturating_sub(area.y)))
+                            .min(maximum);
+                    } else if top < offset {
                         offset = top;
                     } else if top >= offset + usize::from(area.height) {
                         offset = top + 1 - usize::from(area.height);
@@ -3110,7 +3111,6 @@ impl Chat {
                 top += part.height + part.gap;
             }
             self.scroll = maximum.saturating_sub(offset);
-            self.reveal_focus = false;
         }
         let mut top = 0usize;
         for part in paragraphs {
@@ -3216,6 +3216,11 @@ struct ActivityKey {
     invocation: InvocationId,
     agent: Option<usize>,
     kind: ActivityKind,
+}
+
+enum ActivityReveal {
+    Focus,
+    Anchor { key: ActivityKey, row: u16 },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3444,7 +3449,10 @@ impl Activity {
         ];
         spans.extend(summary);
         if !arrow.is_empty() {
-            spans.push(Span::raw(format!(" {arrow}")));
+            spans.push(Span::styled(
+                format!(" {arrow}"),
+                Style::new().fg(palette.muted),
+            ));
         }
         Line::from(spans)
     }
