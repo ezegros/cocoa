@@ -7,6 +7,19 @@
   </picture>
 </p>
 
+<p align="center">
+  <a href="docs/installation.md">Install</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="https://github.com/ezegros/cocoa/releases">Releases</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ezegros/cocoa/actions/workflows/ci.yml"><img src="https://github.com/ezegros/cocoa/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/ezegros/cocoa/releases/latest"><img src="https://img.shields.io/github/v/release/ezegros/cocoa" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache-2.0"></a>
+</p>
+
 Cocoa is an open-source coding agent for your terminal, written in Rust. Ask it to explore a codebase, change files or run tests.
 
 The agent works through a persistent JavaScript REPL. It can combine tool calls, process their results and reuse variables across steps without sending every intermediate result back to the model. Each subagent gets its own conversation and REPL while sharing your project files.
