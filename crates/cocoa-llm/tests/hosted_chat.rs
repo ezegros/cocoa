@@ -433,7 +433,6 @@ async fn partial_refused_malformed_and_unbounded_calls_never_execute_or_retry()
     for arguments in [
         "{}",
         "{\"code\":42}",
-        "{\"code\":\"print(1)\",\"extra\":true}",
         "{\"code\":\"x\",\"code\":\"y\"}",
         "{\"code\":",
         "[]",

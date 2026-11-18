@@ -404,7 +404,7 @@ fn run_chatgpt(command: AuthCommand) -> Result<(), AuthError> {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "kebab-case")]
 enum Record {
     ApiKey { api_key: String },
 }

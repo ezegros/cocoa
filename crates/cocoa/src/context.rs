@@ -147,7 +147,6 @@ impl ContextRecords {
         match name {
             "context.get" => {
                 #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
                 struct Arguments {
                     key: String,
                 }
@@ -182,7 +181,6 @@ impl ContextRecords {
         owner: Option<AgentId>,
     ) -> Result<Value, CapabilityError> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Arguments {
             key: String,
             content: ContextContent,
@@ -258,7 +256,6 @@ impl ContextRecords {
 
     fn list(&self, arguments: Value, limits: WorkLimits) -> Result<Value, CapabilityError> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Filters {
             #[serde(rename = "type")]
             kind: Option<ContextType>,

@@ -387,18 +387,18 @@ fn alias_updates_preserve_settings_and_clear_thinking_explicitly() -> Result<(),
         "default_tier",
         "order",
     ] {
-        let mut invalid = value.clone();
+        let mut compatible = value.clone();
         if removed == "order" {
-            invalid["aliases"]["high"][2][removed] = json!(31);
+            compatible["aliases"]["high"][2][removed] = json!(31);
         } else {
-            invalid[removed] = json!(null);
+            compatible[removed] = json!(null);
         }
-        let bytes = serde_json::to_vec(&invalid)?;
+        let bytes = serde_json::to_vec(&compatible)?;
         std::fs::write(&path, &bytes)?;
         let output = run(&[])?;
-        assert!(!output.status.success(), "{removed}");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("invalid JSON configuration"));
-        assert_eq!(std::fs::read(&path)?, bytes);
+        assert!(output.status.success(), "{removed}");
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(saved, value);
     }
     assert_eq!(std::fs::read(&unrelated_path)?, unrelated);
     assert_eq!(

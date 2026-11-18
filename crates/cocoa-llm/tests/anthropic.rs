@@ -608,7 +608,6 @@ async fn partial_failed_refused_and_inconsistent_stops_never_return_calls()
     fixtures.push(std::mem::take(&mut duplicate));
     for input in [
         json!({"code":""}),
-        json!({"code":"print(1)","extra":true}),
         json!({"code":1}),
         json!({"source":"print(1)"}),
     ] {

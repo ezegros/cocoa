@@ -355,7 +355,6 @@ impl AgentParticipant {
                 )
             })?;
             #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
             struct Arguments {
                 key: String,
                 content: cocoa_core::context::ContextContent,
@@ -1215,7 +1214,6 @@ impl ManagedCapabilities {
             ));
         }
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Arguments {
             name: String,
             prompt: String,
@@ -1482,7 +1480,6 @@ impl ManagedCapabilities {
         cancellation: CancellationToken,
     ) -> Result<Value, CapabilityError> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Arguments {
             handles: BTreeMap<String, String>,
             timeout_ms: Option<u32>,
@@ -1559,7 +1556,6 @@ impl ManagedCapabilities {
         cancellation: CancellationToken,
     ) -> Result<Value, CapabilityError> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Arguments {
             reference: String,
         }

@@ -1951,11 +1951,7 @@ async fn ollama_requires_successful_finish_and_done_before_executing_any_call()
                 + "data: [DONE]\n\n",
         );
     }
-    for arguments in [
-        "{\"code\":",
-        "{\"code\":\" \"}",
-        "{\"code\":\"7 * 3 + 2\",\"other\":1}",
-    ] {
+    for arguments in ["{\"code\":", "{\"code\":\" \"}"] {
         let mut invalid = function.clone();
         invalid["function"]["arguments"] = json!(arguments);
         cases.push(
@@ -3140,7 +3136,6 @@ async fn only_complete_exec_arguments_are_executable_and_disabled_mode_rejects_t
         "{\"code\":",
         "{\"code\":7}",
         "{\"code\":\"\"}",
-        "{\"code\":\"ok\",\"extra\":1}",
         "{\"code\":\"a\",\"code\":\"b\"}",
     ] {
         let mut item = call(0, "ignored");

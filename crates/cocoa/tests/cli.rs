@@ -1288,16 +1288,11 @@ fn invalid_configuration_and_alias_choices_fail_without_network_or_writes()
     let endpoint = format!("http://{}/v1/responses", listener.local_addr()?);
     for (field, replacement, expected) in [
         (
-            "api_key",
-            json!("private-sentinel"),
-            "invalid JSON configuration",
-        ),
-        ("providers", json!({"unknown":{}}), "unsupported provider"),
-        (
             "web_search",
             json!({"provider":"mcp"}),
             "invalid JSON configuration",
         ),
+        ("providers", json!({"unknown":{}}), "unsupported provider"),
         ("input_bytes", json!(8_388_609), "invalid bounds"),
         ("compaction", json!({"request_bytes":0}), "invalid bounds"),
         ("compaction", json!({"trigger_bytes":0}), "invalid bounds"),
@@ -1337,23 +1332,8 @@ fn invalid_configuration_and_alias_choices_fail_without_network_or_writes()
             json!({"target_bytes":null}),
             "invalid JSON configuration",
         ),
-        (
-            "compaction",
-            json!({"request_tokens":1000}),
-            "invalid JSON configuration",
-        ),
         ("timeout_ms", json!(0), "invalid bounds"),
         ("default_alias", json!("missing"), "default_alias"),
-        (
-            "default_preset",
-            json!("missing"),
-            "invalid JSON configuration",
-        ),
-        (
-            "presets",
-            json!({"default":["openai/model"]}),
-            "invalid JSON configuration",
-        ),
         ("aliases", json!({"medium":[]}), "aliases require"),
         (
             "aliases",
@@ -1469,7 +1449,7 @@ fn alias_startup_priority_reaches_the_provider() -> Result<(), Box<dyn Error>> {
     ]);
     for arguments in [vec![], vec!["--alias", "medium"], vec!["--model", "medium"]] {
         assert_selection(
-            json!({"aliases":{"medium":entries},"default_alias":"medium"}),
+            json!({"aliases":{"medium":entries},"default_alias":"medium","api_key":"private-sentinel","compaction":{"request_tokens":1000},"default_preset":"missing","presets":{"default":["openai/model"]}}),
             &arguments,
             "first",
             Value::Null,

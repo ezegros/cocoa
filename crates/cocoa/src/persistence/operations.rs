@@ -349,7 +349,6 @@ async fn apply(
                 return Err(PersistenceError::OperationMismatch);
             };
             #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
             struct Arguments {
                 name: String,
                 prompt: String,
@@ -458,7 +457,6 @@ async fn apply(
                 return Err(PersistenceError::OperationMismatch);
             };
             #[derive(serde::Deserialize)]
-            #[serde(deny_unknown_fields)]
             struct Arguments {
                 key: String,
                 content: ContextContent,

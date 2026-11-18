@@ -614,7 +614,6 @@ impl OAuthClient {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct Store {
     issuer: String,
     resource: String,

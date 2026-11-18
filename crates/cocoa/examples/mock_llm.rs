@@ -53,14 +53,12 @@ struct Request {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Response {
     status: u16,
     events: Vec<Event>,
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Event {
     data: String,
     delayed: bool,

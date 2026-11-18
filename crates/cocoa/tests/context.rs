@@ -65,7 +65,6 @@ async fn replacements_preserve_detached_values_exact_names_and_session_isolation
     for content in [
         json!({"type":"decision"}),
         json!({"type":"Decision","value":1}),
-        json!({"type":"decision","value":1,"owner":"peer"}),
         json!({"type":"decision","value":1,"labels":null}),
         json!({"type":"decision","value":1,"labels":[""]}),
     ] {
@@ -76,17 +75,24 @@ async fn replacements_preserve_detached_values_exact_names_and_session_isolation
         );
         assert_eq!(get(&host, "Build.Mode").await?, replaced);
     }
-    rejection(
+    assert_eq!(
         call(
             &host,
             "context.get",
             json!({"key":"Build.Mode","session":"foreign"}),
             65536,
         )
-        .await,
-        "invalid_arguments",
-        Some("1"),
+        .await?,
+        replaced
     );
+    let saved = set(
+        &host,
+        "Build.Mode",
+        json!({"type":"decision","value":1,"owner":"peer"}),
+    )
+    .await?;
+    assert_eq!(saved["owner"], "1");
+    assert_eq!(get(&host, "Build.Mode").await?, saved);
     for name in ["context.delete", "context.clear", "context.transfer"] {
         rejection(
             call(&host, name, json!({"key":"Build.Mode"}), 65536).await,
@@ -182,7 +188,6 @@ async fn filtered_discovery_uses_current_views_and_complete_byte_bounded_pages()
         json!({"limit":65}),
         json!({"limit":null}),
         json!({"after":""}),
-        json!({"owner":"root"}),
     ] {
         rejection(
             call(&host, "context.list", filters, 65536).await,
@@ -190,6 +195,10 @@ async fn filtered_discovery_uses_current_views_and_complete_byte_bounded_pages()
             None,
         );
     }
+    assert_eq!(
+        call(&host, "context.list", json!({"owner":"root"}), 65536).await?,
+        call(&host, "context.list", json!({}), 65536).await?
+    );
     let labels: Vec<String> = (0..16)
         .map(|index| format!("{index:02}{}", "x".repeat(62)))
         .collect();

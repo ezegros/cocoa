@@ -22,7 +22,6 @@ use super::{
 /// Nonsecret provider identity and policy saved with accepted root input.
 /// Later input may rebind settings until the root retains model output.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EffectiveSessionSettings {
     pub alias: String,
     pub provider: String,
@@ -39,7 +38,6 @@ pub struct EffectiveSessionSettings {
 
 /// Saved eligible child alias definition. Credentials are resolved separately.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EffectiveAliasSettings {
     pub provider: String,
     pub model: String,
@@ -55,7 +53,6 @@ pub struct EffectiveAliasSettings {
 
 /// Effective execution/admission policy retained without process-local handles.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SessionExecutionLimits {
     pub input_bytes: u64,
     pub output_bytes: u64,
@@ -72,7 +69,7 @@ pub struct SessionExecutionLimits {
 
 /// An empty session need not have selected a provider or configured credentials.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum StoredSessionSettings {
     Unconfigured,
     Bound {
@@ -82,7 +79,6 @@ pub enum StoredSessionSettings {
 
 /// Exact accepted assignment, separate from a nonunique display name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AgentAssignment {
     pub prompt: String,
     pub alias: String,

@@ -166,7 +166,6 @@ async fn invalid_cancelled_and_expired_searches_make_no_request() -> Result<(), 
         json!({"query":"x","limit":1.5}),
         json!({"query":"x","limit":null}),
         json!({"query":"λ".repeat(2049)}),
-        json!({"query":"x","api_key":"not-accepted"}),
     ] {
         assert!(matches!(
             search
@@ -334,7 +333,7 @@ async fn cancelling_search_releases_capacity_for_later_calls() -> Result<(), Box
             search
                 .call(
                     "cocoa.web_search",
-                    json!({"query":"next","limit":1}),
+                    json!({"query":"next","limit":1,"api_key":"ignored"}),
                     limits(),
                     CancellationToken::new()
                 )

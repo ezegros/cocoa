@@ -252,7 +252,6 @@ impl Request {
         match name {
             "history.read" => {
                 #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
                 struct Arguments {
                     record: String,
                     offset: Option<u32>,
@@ -283,7 +282,6 @@ impl Request {
             }
             "history.list" => {
                 #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
                 struct Arguments {
                     cursor: Option<String>,
                     limit: Option<u32>,
@@ -298,7 +296,6 @@ impl Request {
             }
             _ => {
                 #[derive(Deserialize)]
-                #[serde(deny_unknown_fields)]
                 struct Arguments {
                     query: String,
                     cursor: Option<String>,

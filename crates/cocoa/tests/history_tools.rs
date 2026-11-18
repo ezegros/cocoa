@@ -303,13 +303,21 @@ async fn text_pages_validate_utf8_arguments_and_independent_output_limits()
             .ok_or("missing text continuation")?;
     }
     assert_eq!(restored, original);
+    assert_eq!(
+        call(
+            &fixture.host,
+            "history.read",
+            json!({"record":record,"agent":"foreign"})
+        )
+        .await?,
+        call(&fixture.host, "history.read", json!({"record":record})).await?
+    );
     for arguments in [
         json!({"record":record,"offset":1}),
         json!({"record":record,"offset":u32::MAX}),
         json!({"record":record,"limit":1}),
         json!({"record":record,"limit":16385}),
         json!({"record":record,"limit":null}),
-        json!({"record":record,"agent":"foreign"}),
         json!({"record":1}),
         json!({"record":"01"}),
         json!({"record":"+1"}),
@@ -320,13 +328,25 @@ async fn text_pages_validate_utf8_arguments_and_independent_output_limits()
             "invalid_arguments",
         );
     }
+    assert_eq!(
+        call(&fixture.host, "history.list", json!({"agent":"foreign"})).await?,
+        call(&fixture.host, "history.list", json!({})).await?
+    );
+    assert_eq!(
+        call(
+            &fixture.host,
+            "history.search",
+            json!({"query":"x","regex":true})
+        )
+        .await?,
+        call(&fixture.host, "history.search", json!({"query":"x"})).await?
+    );
     for arguments in [
         json!(null),
         json!([]),
         json!({"cursor":null}),
         json!({"limit":17}),
         json!({"limit":0}),
-        json!({"agent":"foreign"}),
     ] {
         rejection(
             call(&fixture.host, "history.list", arguments).await,
@@ -337,7 +357,6 @@ async fn text_pages_validate_utf8_arguments_and_independent_output_limits()
         json!({"query":""}),
         json!({"query":null}),
         json!({"query":"λ".repeat(257)}),
-        json!({"query":"x","regex":true}),
     ] {
         rejection(
             call(&fixture.host, "history.search", arguments).await,

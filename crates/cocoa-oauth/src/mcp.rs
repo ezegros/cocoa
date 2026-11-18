@@ -37,14 +37,12 @@ pub struct McpLogin {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Stored {
     endpoint: String,
     registration: Option<Registration>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Registration {
     generation: String,
     resource: String,
@@ -56,7 +54,6 @@ struct Registration {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Tokens {
     access_token: String,
     refresh_token: Option<String>,

@@ -336,7 +336,6 @@ struct CommandCapture {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct SavedOutcome {
     name: String,
     status: String,
@@ -361,7 +360,6 @@ struct SavedOutcome {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct SavedError {
     code: String,
     message: String,

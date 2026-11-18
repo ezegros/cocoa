@@ -82,7 +82,6 @@ pub enum CodingOperation {
 /// Replacement newlines follow the observation's first newline style, or LF
 /// when it has none; other replacement characters are preserved verbatim.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct TextEdit {
     pub old_text: String,
     pub new_text: String,
@@ -99,7 +98,6 @@ pub enum ReadSelector {
 
 /// Shell arguments. Missing options differ from invalid explicit JSON nulls.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct RunArguments {
     /// Shell source, not an executable name or an argument vector. NUL is rejected.
     pub command: String,
@@ -735,31 +733,26 @@ impl Method {
 
     fn parse(self, value: Value) -> Result<CodingOperation, CapabilityError> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Write {
             file: String,
             content: String,
         }
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Edit {
             file: String,
             edits: Vec<TextEdit>,
         }
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Wait {
             handles: std::collections::BTreeMap<String, String>,
             #[serde(default, deserialize_with = "present")]
             timeout_ms: Option<u32>,
         }
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Cancel {
             reference: String,
         }
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct LoadSkill {
             id: String,
         }

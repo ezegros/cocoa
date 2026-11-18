@@ -22,6 +22,19 @@ use wiremock::{
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+#[tokio::test]
+async fn persisted_store_accepts_unknown_fields() -> TestResult {
+    let fixture = Fixture::new().await?;
+    fixture.login("account_one", 3600, "use.direct").await?;
+    let expected = fixture.client.active_registration()?;
+    let mut disk: Value = serde_json::from_slice(&std::fs::read(&fixture.path)?)?;
+    disk["unknown"] = json!({"future": [true, null]});
+    std::fs::write(&fixture.path, serde_json::to_vec(&disk)?)?;
+    assert_eq!(fixture.client.active_registration()?, expected);
+    assert_eq!(fixture.client.accounts()?.len(), 1);
+    Ok(())
+}
+
 #[test]
 fn literal_loopback_http_accepts_both_ip_families_without_trusting_other_hosts() -> TestResult {
     let directory = tempfile::tempdir()?;

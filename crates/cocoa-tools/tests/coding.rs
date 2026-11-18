@@ -218,8 +218,14 @@ async fn activity_describes_targets_ranges_and_counts_without_exposing_file_cont
         "cocoa.write",
         &json!({"file":read["file"],"content":"secret","unexpected":true}),
     );
-    assert_eq!(input.text, "Input details unavailable.");
-    assert_eq!(input.summary, None);
+    assert_eq!(input.text, "Bytes supplied: 6");
+    assert_eq!(
+        input.summary,
+        Some(ActivitySummary::LineChanges {
+            added: 1,
+            removed: 0
+        })
+    );
     let command = "\nprintf '%s\\n' 'a long command argument that exceeds the old eighty-byte header cutoff'\nexit 7";
     let input = fixture.host.describe_input(
         "cocoa.run",
@@ -1001,9 +1007,7 @@ async fn edit_schema_is_object_only_and_64_edits_consume_one_fresh_observation()
         json!({"file":read["file"],"edits":null}),
         json!({"file":read["file"],"edits":{ "old_text":"key-00!","new_text":"x"}}),
         json!({"file":read["file"],"edits":[{"old_text":"key-00!","new_text":null}]}),
-        json!({"file":read["file"],"edits":[{"old_text":"key-00!","new_text":"x","extra":1}]}),
         json!({"file":read["file"],"edits":[["key-00!","x"]]}),
-        json!({"file":read["file"],"edits":[{"old_text":"key-00!","new_text":"x"}],"old_text":"legacy"}),
     ] {
         failure(
             fixture.call("cocoa.edit", arguments).await,
@@ -1028,9 +1032,12 @@ async fn edit_schema_is_object_only_and_64_edits_consume_one_fresh_observation()
         );
     }
     assert!(!fixture.directory.path().join("unexpected").exists());
-    let edits: Vec<_> = (0..64).rev().map(|index| json!({"old_text":format!("key-{index:02}!"),"new_text":format!("replacement-{index}")})).collect();
+    let edits: Vec<_> = (0..64).rev().map(|index| json!({"old_text":format!("key-{index:02}!"),"new_text":format!("replacement-{index}"),"extra":1})).collect();
     let edited = fixture
-        .call("cocoa.edit", json!({"file":read["file"],"edits":edits}))
+        .call(
+            "cocoa.edit",
+            json!({"file":read["file"],"edits":edits,"old_text":"legacy"}),
+        )
         .await?;
     let expected: String = (0..64)
         .map(|index| format!("replacement-{index}\n"))

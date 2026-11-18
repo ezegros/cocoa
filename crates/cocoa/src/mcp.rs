@@ -125,7 +125,7 @@ impl<'de> Deserialize<'de> for SearchProvider {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Serde rejects unknown fields on empty struct variants, but not unit variants.
         #[derive(Deserialize)]
-        #[serde(tag = "provider", rename_all = "snake_case", deny_unknown_fields)]
+        #[serde(tag = "provider", rename_all = "snake_case")]
         enum Fields {
             Exa {},
             Disabled {},
@@ -324,7 +324,6 @@ impl Server {
 impl<'de> Deserialize<'de> for Server {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
         struct Fields {
             id: String,
             url: String,
@@ -946,7 +945,6 @@ impl CapabilityHost for McpCapabilities {
         }
         if name == "cocoa.mcp_tools" {
             #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
             struct Query {
                 server: Option<String>,
                 query: Option<String>,

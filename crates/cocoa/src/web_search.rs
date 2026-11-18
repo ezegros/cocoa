@@ -41,7 +41,6 @@ struct Shared {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Arguments {
     query: String,
     limit: Option<u8>,

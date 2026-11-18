@@ -380,7 +380,6 @@ impl Updater {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct Receipt {
     schema: u32,
     repository: String,

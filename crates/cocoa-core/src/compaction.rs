@@ -23,7 +23,6 @@ use crate::{
 
 /// Explicit checkpoint bounds, independent of history and provider request limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CheckpointLimits {
     pub bytes: u64,
     pub required_entries: u64,
@@ -38,7 +37,6 @@ pub struct RequiredEntryId(u64);
 /// An exact original excerpt. Repeated excerpts expand to the whole message.
 /// Supplying the whole message explicitly also preserves ambiguous scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Quotation {
     pub source: RecordId,
     pub text: String,
@@ -46,7 +44,6 @@ pub struct Quotation {
 
 /// User direction and user adoption retain their distinct original authors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RequiredOrigin {
     User {
         quotations: Vec<Quotation>,
@@ -59,7 +56,6 @@ pub enum RequiredOrigin {
 
 /// Work is pending unless the user explicitly paused it. Plan deferral is separate.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RequestState {
     Pending,
     Paused {
@@ -70,7 +66,6 @@ pub enum RequestState {
 
 /// Proposed mandatory material. `request: None` denotes an ongoing requirement.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequiredAddition {
     pub origin: RequiredOrigin,
     pub scope: String,
@@ -80,7 +75,6 @@ pub struct RequiredAddition {
 
 /// A carried entry. The host assigns IDs and never recycles retired IDs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequiredEntry {
     pub id: RequiredEntryId,
     pub content: RequiredAddition,
@@ -88,7 +82,6 @@ pub struct RequiredEntry {
 
 /// An original-evidence-backed claim, not mechanically established truth.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EvidenceNote {
     pub text: String,
     pub sources: Vec<RecordId>,
@@ -96,7 +89,6 @@ pub struct EvidenceNote {
 
 /// Representation maintenance cannot change request control state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequiredCorrection {
     pub origin: RequiredOrigin,
     pub scope: String,
@@ -105,7 +97,6 @@ pub struct RequiredCorrection {
 
 /// A separate explanation is required for a correction and a work transition.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub enum RequiredTransition {
     Pause {
         instruction: RequiredOrigin,
@@ -125,7 +116,6 @@ pub enum RequiredTransition {
 
 /// An atomic set permits at most one change per existing entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct RequiredChange {
     pub entry: RequiredEntryId,
     #[serde(deserialize_with = "required_option")]
@@ -149,7 +139,6 @@ pub enum RecapStatus {
 
 /// Plan keys are local to a checkpoint, not persistent work identities.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PlanStage {
     pub key: String,
     pub text: String,
@@ -162,7 +151,6 @@ pub struct PlanStage {
 
 /// Preserve the goal and deferred branches independently of the next action.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Recap {
     pub goal: String,
     pub stages: Vec<PlanStage>,
@@ -177,7 +165,6 @@ pub struct Recap {
 /// Unvalidated proposal. Coverage, lineage and durable IDs belong to the host.
 /// Decode model output through [`SummaryAttempt`] to resolve temporary sources.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CheckpointProposal {
     pub additions: Vec<RequiredAddition>,
     pub changes: Vec<RequiredChange>,
@@ -187,7 +174,6 @@ pub struct CheckpointProposal {
 
 /// Canonical effect evidence that must not become permission to repeat work.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct UnresolvedEffect {
     pub start: RecordId,
     #[serde(deserialize_with = "required_option")]
@@ -197,7 +183,6 @@ pub struct UnresolvedEffect {
 
 /// The portable, always-visible checkpoint. Original sources remain in the store.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CheckpointContent {
     pub through: RecordId,
     #[serde(deserialize_with = "required_option")]
@@ -730,7 +715,6 @@ pub enum CheckpointError {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct CheckpointEncoding {
     content: CheckpointContent,
     after: RecordId,

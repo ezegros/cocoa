@@ -983,7 +983,6 @@ pub(crate) fn identifier<'a>(value: &'a Value, key: &str) -> Result<&'a str, Mod
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ExecArguments {
     code: String,
 }

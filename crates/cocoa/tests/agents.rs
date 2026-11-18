@@ -1593,7 +1593,6 @@ async fn admission_is_atomic_and_handles_are_authorized() -> Result<(), Box<dyn 
         json!({"name":"a b","prompt":"work"}),
         json!({"name":"x".repeat(65),"prompt":"work"}),
         json!({"name":"worker","prompt":" "}),
-        json!({"name":"worker","prompt":"work","extra":1}),
     ] {
         assert!(
             matches!(call(&host,"cocoa.spawn",arguments).await,Err(CapabilityError::Tool {code,..}) if code=="invalid_arguments")
@@ -1602,7 +1601,7 @@ async fn admission_is_atomic_and_handles_are_authorized() -> Result<(), Box<dyn 
     assert!(
         matches!(spawn(&host,"worker","work","missing").await,Err(CapabilityError::Tool {code,..}) if code=="alias_unavailable")
     );
-    let arguments = json!({"name":"worker","prompt":"work","alias":"high"});
+    let arguments = json!({"name":"worker","prompt":"work","alias":"high","extra":1});
     let receipt = call(&host, "cocoa.spawn", arguments).await?;
     let reference = receipt["reference"].clone();
     assert!(

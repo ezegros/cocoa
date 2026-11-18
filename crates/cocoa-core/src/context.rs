@@ -16,7 +16,6 @@ use crate::{
 /// Stores validate paths, bounds, delivery transitions and retained feedback
 /// targets on acceptance. Discovery and filesystem authority remain tool policy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InstructionState {
     pub invocation: InvocationId,
     pub scoped_sources: Vec<ScopedInstruction>,
@@ -27,7 +26,6 @@ pub struct InstructionState {
 
 /// Captured scoped instructions, including a deletion awaiting model delivery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ScopedInstruction {
     pub source_path: PathBuf,
     pub content: InstructionContent,
@@ -43,7 +41,6 @@ pub enum InstructionContent {
 
 /// A selected skill body, independent of its current catalog entry or file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SelectedSkill {
     pub source_path: PathBuf,
     pub text: String,
@@ -61,7 +58,6 @@ pub enum InstructionDelivery {
 /// Historical note text attached to a retained completed cell by stable identity.
 /// Unlike [`FeedbackNote`], this reference does not depend on context projection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InstructionFeedback {
     pub record: RecordId,
     pub text: String,
@@ -80,7 +76,6 @@ pub struct ContextRecord {
 /// Agent-authored content. Replacement replaces every field; omitted labels
 /// become empty. `value: null` is present content, not an absent record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ContextContent {
     #[serde(rename = "type")]
     pub kind: ContextType,

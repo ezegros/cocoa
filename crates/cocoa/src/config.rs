@@ -562,7 +562,6 @@ pub struct ThinkingChoice(pub Option<ThinkingLevel>);
 
 /// A configured alias or a direct `provider/model` selection.
 #[derive(Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct Selection {
     pub alias: Option<String>,
     pub model: Option<String>,
@@ -579,7 +578,6 @@ pub struct Presentation {
 }
 
 #[derive(Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct Settings {
     #[serde(
         default,
@@ -649,7 +647,7 @@ struct Settings {
 /// independent bounds do not imply token-window fit. Summaries use the selected
 /// provider/model and preserve its thinking settings; there is no fallback.
 #[derive(Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 struct CompactionSettings {
     /// Complete encoded continuation request, including provider framing. Default 64 MiB.
     request_bytes: u64,
@@ -699,7 +697,6 @@ impl CompactionSettings {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct Provider {
     #[serde(default, deserialize_with = "credential_reference")]
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -710,7 +707,6 @@ struct Provider {
 
 /// One model choice, ordered by priority within regular or fallback-only choices.
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct Alias {
     pub provider: String,
     pub model: String,
@@ -954,7 +950,7 @@ pub fn load_selection(
 /// Entries must be unique within each list, nonblank and free of control characters.
 /// Model keys allow at most 512 bytes, alias keys 64 bytes, and serialized state 65,536 bytes.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct SelectorPreferences {
     pub model_pins: Vec<String>,
     pub model_recent: Vec<String>,
@@ -2068,7 +2064,6 @@ fn resolve_credentials(mut configuration: Configuration) -> Result<Configuration
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 struct RememberedSelection {
     selection: Selection,
     provider_configured: bool,

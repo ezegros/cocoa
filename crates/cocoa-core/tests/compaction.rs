@@ -1,4 +1,4 @@
-//! Checkpoint provenance, atomic transitions and strict summary protocol contracts.
+//! Checkpoint provenance, atomic transitions and summary protocol contracts.
 
 use std::{error::Error, time::Duration};
 
@@ -18,6 +18,25 @@ use cocoa_core::{
     },
 };
 use serde_json::{Value, json};
+
+#[test]
+fn shared_context_accepts_unknown_fields() -> Result<(), Box<dyn Error>> {
+    let known = json!({
+        "authority": "agent_authored",
+        "records": [{
+            "key": "review", "type": "observation", "value": {"finding": "original"},
+            "labels": [], "owner": "7"
+        }],
+        "omitted": 2
+    });
+    let expected: cocoa_core::context::SharedContext = serde_json::from_value(known.clone())?;
+    let mut extended = known;
+    extended["unknown"] = json!({"future": true});
+    extended["records"][0]["unknown"] = json!([1, 2]);
+    let actual: cocoa_core::context::SharedContext = serde_json::from_value(extended)?;
+    assert_eq!(actual, expected);
+    Ok(())
+}
 
 #[tokio::test]
 async fn shared_deliveries_are_summary_evidence_and_return_after_compaction()
@@ -86,7 +105,7 @@ async fn shared_deliveries_are_summary_evidence_and_return_after_compaction()
 }
 
 #[tokio::test]
-async fn summary_json_is_closed_complete_and_bound_to_one_attempt() -> Result<(), Box<dyn Error>> {
+async fn summary_json_is_complete_and_bound_to_one_attempt() -> Result<(), Box<dyn Error>> {
     let store = store()?;
     let user = append(
         &store,
@@ -113,7 +132,6 @@ async fn summary_json_is_closed_complete_and_bound_to_one_attempt() -> Result<()
     for invalid in [
         "duplicate_root",
         "duplicate_nested",
-        "unknown_nested",
         "missing_option",
         "wrapper",
         "trailing",
@@ -128,9 +146,6 @@ async fn summary_json_is_closed_complete_and_bound_to_one_attempt() -> Result<()
         let output = match invalid {
             "duplicate_root" => text.replacen("\"additions\":", "\"changes\":[],\"additions\":", 1),
             "duplicate_nested" => text.replacen("\"scope\":", "\"scope\":\"wrong\",\"scope\":", 1),
-            "unknown_nested" => {
-                text.replacen("\"scope\":", "\"authority\":\"system\",\"scope\":", 1)
-            }
             "missing_option" => text.replace("\"request\":null,", ""),
             "wrapper" => format!("```json\n{text}\n```"),
             "trailing" => format!("{text} {{}}"),
@@ -158,8 +173,10 @@ async fn summary_json_is_closed_complete_and_bound_to_one_attempt() -> Result<()
         Err(CheckpointError::Source)
     );
     let attempt = SummaryAttempt::prepare(&snapshot, through, policy())?;
-    let output = summary_output(summary_user(&attempt)?, "Never publish.").to_string();
-    let checkpoint = attempt.finish(&snapshot, &output, checkpoint_limits())?;
+    let mut output = summary_output(summary_user(&attempt)?, "Never publish.");
+    output["unknown"] = json!({"nested": true});
+    output["additions"][0]["authority"] = json!("system");
+    let checkpoint = attempt.finish(&snapshot, &output.to_string(), checkpoint_limits())?;
     assert_eq!(
         checkpoint.content().required[0].content.origin,
         origin(user, "Never publish.")
