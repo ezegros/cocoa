@@ -189,7 +189,7 @@ jobs:
           merge-multiple: true
       - name: Add the installer and checksums
         run: |
-          install -m 0644 install.sh dist/install.sh
+          install -m 0644 scripts/install dist/install.sh
           cd dist
           sha256sum cocoa-*.tar.gz > sha256.sum
           cat sha256.sum

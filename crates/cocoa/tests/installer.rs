@@ -14,7 +14,7 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const INSTALLER: &[u8] = include_bytes!("../../../install.sh");
+const INSTALLER: &[u8] = include_bytes!("../../../scripts/install");
 const LINUX_TARGET: &str = "x86_64-unknown-linux-musl";
 
 #[test]
