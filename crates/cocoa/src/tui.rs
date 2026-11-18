@@ -156,7 +156,7 @@ pub(crate) async fn run(
                 directory = target.directory.clone();
                 restored = Some(target);
             } else {
-                commands.picker = Some(SessionPicker::new(database, directory.clone(), String::new()));
+                commands.picker = Some(SessionPicker::new(database, directory.clone(), String::new(), resume.all));
                 commands.picker_cwd = resume.cwd.clone();
             }
         }
@@ -491,7 +491,8 @@ async fn session(
                             };
                             if let Some(query) = query {
                                 commands.picker_cwd = match &action { config::SessionAction::Resume(resume) => resume.cwd.clone(), _ => None };
-                                commands.picker = Some(SessionPicker::new(database, working_directory.clone(), query));
+                                let all = matches!(&action, config::SessionAction::Resume(resume) if resume.all);
+                                commands.picker = Some(SessionPicker::new(database, working_directory.clone(), query, all));
                                 dirty = true;
                                 continue;
                             }

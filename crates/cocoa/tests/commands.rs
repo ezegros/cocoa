@@ -582,7 +582,7 @@ fn session_listing_keeps_missing_storage_absent() -> Result<(), Box<dyn Error>> 
 }
 
 #[tokio::test]
-async fn session_search_is_literal_and_needs_no_configuration_or_credentials()
+async fn session_search_matches_all_words_without_configuration_or_credentials()
 -> Result<(), Box<dyn Error>> {
     use cocoa_core::store::{InvocationId, Record, RecordKind, Store, StoreLimits};
     let home = tempfile::tempdir()?;
@@ -630,7 +630,7 @@ async fn session_search_is_literal_and_needs_no_configuration_or_credentials()
     )?;
     std::fs::write(config.join("auth.json"), b"malformed-auth-private-sentinel")?;
     let before = database.list_sessions(None, 20, None).await?;
-    let matched = run("  été 100%_ or  ")
+    let matched = run("  or 100%_ été  ")
         .stdin(Stdio::null())
         .output_bounded()?;
     assert!(
@@ -650,10 +650,16 @@ async fn session_search_is_literal_and_needs_no_configuration_or_credentials()
         matched["sessions"][0]["snippet"],
         "Été 100%_ OR literal phrase"
     );
+    for query in ["été literal", "% OR"] {
+        let output = run(query).stdin(Stdio::null()).output_bounded()?;
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(serde_json::from_slice::<Value>(&output.stdout)?, matched);
+    }
     for query in [
         "100_ OR",
-        "été literal",
-        "% OR",
+        "été absent",
+        "% missing",
         "malformed-config-private-sentinel",
     ] {
         let output = run(query).stdin(Stdio::null()).output_bounded()?;

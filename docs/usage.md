@@ -83,7 +83,9 @@ cocoa sessions search "authentication"
 cocoa resume sess_01234567
 ```
 
-Replace the example ID with a full saved ID or an unambiguous prefix containing at least eight hexadecimal digits. Listing and search default to the current directory; `--all` includes other directories. Search matches a case-insensitive literal substring in titles and root conversation text, not tool output or child conversations.
+Replace the example ID with a full saved ID or an unambiguous prefix containing at least eight hexadecimal digits. Listing and search default to the current directory; `--all` includes other directories. Search matches all whitespace-separated words in any order within the same title or root message, not tool output or child conversations. Matching is case-insensitive, each word can match part of a longer word, and punctuation stays literal. For example, `login fix` matches `Fix the login redirect`.
+
+Run `cocoa resume` to open the session picker. Type to search, use the arrow keys to select a session, and press Enter to resume. Tab switches between this project and all projects without clearing the query; `cocoa resume --all` starts with all projects. The selected result shows its project and matching excerpt. Ctrl+U clears the search, and Esc closes the picker.
 
 Resume restores the conversation and shared context, but not live JavaScript state or running child agents. It never replays earlier commands. Changed model, endpoint, account or execution settings can prevent resume. A session already open elsewhere cannot be resumed concurrently.
 

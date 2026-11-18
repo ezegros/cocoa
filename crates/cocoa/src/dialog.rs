@@ -19,6 +19,7 @@ use ratatui::{
 };
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::BTreeMap;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Credential-free discovery. Obsolete scans cannot replace newer results.
 pub(crate) struct RewindPicker {
@@ -106,6 +107,7 @@ impl RewindPicker {
 pub(crate) struct SessionPicker {
     database: Option<cocoa::persistence::SessionDatabase>,
     directory: std::path::PathBuf,
+    all: bool,
     query: String,
     selected: usize,
     matches: Vec<cocoa::persistence::SearchMatch>,
@@ -123,10 +125,12 @@ impl SessionPicker {
         database: Option<cocoa::persistence::SessionDatabase>,
         directory: std::path::PathBuf,
         query: String,
+        all: bool,
     ) -> Self {
         Self {
             database,
             directory,
+            all,
             query,
             selected: 0,
             matches: Vec::new(),
@@ -175,6 +179,9 @@ impl SessionPicker {
                 self.selected = (self.selected + 1).min(self.matches.len().saturating_sub(1));
                 return cocoa::chat::Action::Redraw;
             }
+            (KeyCode::Tab, _) => {
+                self.all = !self.all;
+            }
             (KeyCode::Backspace, _) => {
                 self.query.pop();
             }
@@ -199,12 +206,12 @@ impl SessionPicker {
                 self.status = "No sessions found.".into();
                 return true;
             };
-            let directory = self.directory.clone();
+            let directory = (!self.all).then(|| self.directory.clone());
             let query = self.query.clone();
             self.task = Some(tokio::spawn(async move {
                 if query.trim().is_empty() {
                     Ok(database
-                        .list_sessions(Some(&directory), 50, None)
+                        .list_sessions(directory.as_deref(), 50, None)
                         .await?
                         .sessions
                         .into_iter()
@@ -216,7 +223,7 @@ impl SessionPicker {
                         .collect())
                 } else {
                     Ok(database
-                        .search_sessions(Some(&directory), &query, 50)
+                        .search_sessions(directory.as_deref(), &query, 50)
                         .await?
                         .sessions)
                 }
@@ -238,7 +245,7 @@ impl SessionPicker {
                     self.status = if self.matches.is_empty() {
                         "No sessions found.".into()
                     } else {
-                        "Up to 50 results; refine the search for more.".into()
+                        String::new()
                     };
                 }
                 Ok(Err(error)) => {
@@ -258,11 +265,20 @@ impl SessionPicker {
     pub fn render(&mut self, frame: &mut Frame<'_>, theme: Theme) {
         let palette = theme.palette();
         let bounds = frame.area();
+        let width = bounds.width.saturating_sub(4).min(88);
+        let height = bounds
+            .height
+            .saturating_sub(2)
+            .min(if self.matches.is_empty() {
+                7
+            } else {
+                self.matches.len().min(8) as u16 + 10
+            });
         let area = Rect::new(
-            bounds.x + 2.min(bounds.width / 2),
-            bounds.y + 1.min(bounds.height / 2),
-            bounds.width.saturating_sub(4),
-            bounds.height.saturating_sub(2),
+            bounds.x + (bounds.width - width) / 2,
+            bounds.y + (bounds.height - height) / 2,
+            width,
+            height,
         );
         frame.render_widget(Clear, bounds);
         frame.render_widget(Block::new().style(theme.style()), bounds);
@@ -270,17 +286,48 @@ impl SessionPicker {
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(Style::new().fg(palette.border))
-                .title(" Sessions "),
+                .title(" Resume session "),
             area,
         );
         let inner = area.inner(ratatui::layout::Margin::new(2, 1));
         let muted = palette.muted;
         let clean = |text: &str| {
-            text.chars().filter(|character| !character.is_control() && !matches!(*character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect::<String>()
+            text.chars().map(|character| if character.is_whitespace() { ' ' } else { character }).filter(|character| !character.is_control() && !matches!(*character, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect::<String>()
         };
-        let mut lines = vec![Line::from(format!("/ {}", self.query)), Line::default()];
-        let visible = usize::from(inner.height.saturating_sub(6));
+        let query = clean(&self.query);
+        let mut query_start = query.len();
+        let mut query_width = 0;
+        for (index, grapheme) in query.grapheme_indices(true).rev() {
+            let width = Line::from(grapheme).width();
+            if query_width + width > usize::from(inner.width.saturating_sub(3)) {
+                break;
+            }
+            query_start = index;
+            query_width += width;
+        }
+        let query_visible = &query[query_start..];
+        let mut lines = vec![
+            if self.query.is_empty() {
+                Line::from(vec![
+                    Span::styled("/ ", Style::new().fg(palette.accent)),
+                    Span::styled("Search titles and messages", Style::new().fg(muted)),
+                ])
+            } else {
+                Line::from(format!("/ {query_visible}"))
+            },
+            Line::default(),
+        ];
+        let details_visible = inner.height >= 9;
+        let visible = usize::from(
+            inner
+                .height
+                .saturating_sub(if details_visible { 8 } else { 4 }),
+        );
         let first = self.selected.saturating_sub(visible.saturating_sub(1));
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
         for (index, matched) in self.matches.iter().enumerate().skip(first).take(visible) {
             let session = &matched.session;
             let style = if self.selected == index {
@@ -288,38 +335,120 @@ impl SessionPicker {
             } else {
                 Style::default()
             };
-            lines.push(Line::styled(
-                fit_session_label(
-                    &format!(
-                        "{} {}",
-                        if index == self.selected { "›" } else { " " },
-                        clean(session.title.as_deref().unwrap_or("Untitled session"))
-                    ),
-                    inner.width,
+            let minutes = now_ms.saturating_sub(session.updated_at_ms as u128) / 60_000;
+            let age = match minutes {
+                0 => "now".into(),
+                1..60 => format!("{minutes}m ago"),
+                60..1440 => format!("{}h ago", minutes / 60),
+                _ => format!("{}d ago", minutes / 1440),
+            };
+            let label_width = inner.width.saturating_sub(age.len() as u16 + 2);
+            let label = fit_session_label(
+                &format!(
+                    "{} {}",
+                    if index == self.selected { "›" } else { " " },
+                    clean(session.title.as_deref().unwrap_or("Untitled session"))
                 ),
-                style,
-            ));
+                label_width,
+            );
+            let padding = usize::from(inner.width)
+                .saturating_sub(Line::from(label.as_str()).width() + age.len());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    label,
+                    if index == self.selected {
+                        style.add_modifier(Modifier::BOLD)
+                    } else {
+                        style
+                    },
+                ),
+                Span::styled(" ".repeat(padding), style),
+                Span::styled(age, style.fg(muted)),
+            ]));
         }
         frame.render_widget(Paragraph::new(lines), inner);
         let status = if self.deadline.is_some() || self.task.is_some() {
-            "Searching..."
+            "Searching...".into()
+        } else if !self.status.is_empty() {
+            self.status.clone()
+        } else if self.matches.len() == 50 {
+            "50 results · refine your search for more".into()
         } else {
-            &self.status
+            format!(
+                "{} session{}",
+                self.matches.len(),
+                if self.matches.len() == 1 { "" } else { "s" }
+            )
         };
-        if inner.height >= 3 {
+        if details_visible && let Some(matched) = self.matches.get(self.selected) {
+            let directory = if self.all {
+                matched.session.working_directory.as_path()
+            } else {
+                self.directory
+                    .file_name()
+                    .map(std::path::Path::new)
+                    .unwrap_or(&self.directory)
+            };
+            let project = directory
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default();
             frame.render_widget(
-                Paragraph::new(status).style(Style::new().fg(muted)),
-                Rect::new(inner.x, inner.bottom() - 3, inner.width, 1),
+                Paragraph::new(fit_session_match(
+                    &clean(&directory.to_string_lossy()),
+                    &[project.as_ref()],
+                    inner.width,
+                ))
+                .style(Style::new().fg(muted)),
+                Rect::new(inner.x, inner.bottom() - 5, inner.width, 1),
+            );
+            if !self.query.trim().is_empty() {
+                let source = match matched.source {
+                    cocoa::persistence::SearchSource::Title => "Title",
+                    cocoa::persistence::SearchSource::User => "You",
+                    cocoa::persistence::SearchSource::Assistant => "Assistant",
+                };
+                let words: Vec<_> = self.query.split_whitespace().collect();
+                frame.render_widget(
+                    Paragraph::new(format!(
+                        "{source}: {}",
+                        fit_session_match(
+                            &clean(&matched.snippet),
+                            &words,
+                            inner.width.saturating_sub(source.len() as u16 + 2),
+                        )
+                    ))
+                    .style(Style::new().fg(muted)),
+                    Rect::new(inner.x, inner.bottom() - 4, inner.width, 1),
+                );
+            }
+        }
+        if inner.height >= 2 {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "{status} · {}",
+                    if self.all {
+                        "All projects"
+                    } else {
+                        "This project"
+                    }
+                ))
+                .style(Style::new().fg(muted)),
+                Rect::new(inner.x, inner.bottom() - 2, inner.width, 1),
             );
             frame.render_widget(
-                Paragraph::new("↑↓ select · Enter resume · Esc cancel")
-                    .style(Style::new().fg(muted)),
+                Paragraph::new(if inner.width >= 54 {
+                    "↑↓ select · Enter resume · Tab scope · Esc cancel"
+                } else {
+                    "↑↓ · Enter open · Tab scope · Esc close"
+                })
+                .style(Style::new().fg(muted)),
                 Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
             );
         }
         if inner.width > 2 && inner.height > 0 {
             frame.set_cursor_position((
-                inner.x + 2 + (Line::from(self.query.as_str()).width() as u16).min(inner.width - 3),
+                inner.x + 2 + Line::from(query_visible).width() as u16,
                 inner.y,
             ));
         }
@@ -332,6 +461,7 @@ impl SessionPicker {
         }
         self.deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(200));
         self.selected = 0;
+        self.matches.clear();
         self.status.clear();
         cocoa::chat::Action::Redraw
     }
@@ -2983,6 +3113,42 @@ fn thinking_levels(model: &Model) -> Vec<Option<ThinkingLevel>> {
         }
     }
     levels
+}
+
+fn fit_session_match(text: &str, words: &[&str], width: u16) -> String {
+    if Line::from(text).width() <= usize::from(width) {
+        return text.into();
+    }
+    let lowered = text.to_lowercase();
+    let Some(position) = words
+        .iter()
+        .filter_map(|word| lowered.find(&word.to_lowercase()))
+        .min()
+    else {
+        return fit_session_label(text, width);
+    };
+    let mut lowered_bytes = 0;
+    let context = usize::from(width / 4).clamp(1, 12);
+    let mut preceding = std::collections::VecDeque::with_capacity(context);
+    for (index, grapheme) in text.grapheme_indices(true) {
+        lowered_bytes += grapheme
+            .chars()
+            .flat_map(char::to_lowercase)
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if lowered_bytes > position {
+            let start = preceding.front().copied().unwrap_or(index);
+            return fit_session_label(
+                &format!("{}{}", if start > 0 { "…" } else { "" }, &text[start..]),
+                width,
+            );
+        }
+        if preceding.len() == context {
+            preceding.pop_front();
+        }
+        preceding.push_back(index);
+    }
+    fit_session_label(text, width)
 }
 
 fn fit_session_label(text: &str, width: u16) -> String {

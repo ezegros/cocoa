@@ -1,4 +1,4 @@
-//! Literal root-message search in a bounded read view, without a text projection.
+//! All-word root-message search in a bounded read view, without a text projection.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -49,10 +49,12 @@ pub struct SessionSearch {
 }
 
 impl SessionDatabase {
-    /// Match the trimmed complete query as one Unicode-lowercased substring.
-    /// Punctuation, operators, accents, `%` and `_` remain literal. Empty queries
-    /// list sessions. At most 50 results and 256 KiB are returned, never a silently
-    /// partial scan after cancellation or the cooperative two-second budget.
+    /// Match every whitespace-separated query word as a Unicode-lowercased
+    /// substring in the same title or root message, in any order. Repeated words
+    /// need only one occurrence. Punctuation, operators, accents, `%` and `_`
+    /// remain literal. Empty queries list sessions. At most 50 results and
+    /// 256 KiB are returned, never a silently partial scan after cancellation
+    /// or the cooperative two-second budget.
     ///
     /// # Errors
     /// Reject queries over 512 UTF-8 bytes, invalid limits, malformed payloads,
@@ -390,10 +392,15 @@ fn snippet(
 ) -> Result<Option<String>, PersistenceError> {
     control.check()?;
     let lowered = text.to_lowercase();
+    let mut position = lowered.len();
+    for word in query.split_whitespace() {
+        control.check()?;
+        let Some(found) = lowered.find(word) else {
+            return Ok(None);
+        };
+        position = position.min(found);
+    }
     control.check()?;
-    let Some(position) = lowered.find(query) else {
-        return Ok(None);
-    };
     let mut lowered_bytes = 0;
     let mut original = 0;
     for (index, character) in text.char_indices() {

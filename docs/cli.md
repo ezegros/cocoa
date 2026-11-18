@@ -97,7 +97,7 @@ cocoa resume --last
 | `cocoa resume [SESSION]` | `--all`, `--cwd DIRECTORY` |
 | `cocoa resume --last` | `--all`, `--cwd DIRECTORY` |
 
-List/search default to the current directory and twenty results. They require no terminal or credentials and do not create missing storage. Search is literal and case-insensitive across titles and root conversation text.
+List/search default to the current directory and twenty results. They require no terminal or credentials and do not create missing storage. Search requires every whitespace-separated word to match within the same title or root message, in any order. Matching is case-insensitive and each word is a literal substring, including punctuation.
 
 List JSON contains `sessions` and `next_cursor`. Pass that cursor to `--before` with the same scope flags. Text output prints its cursor to stderr. Search has no pagination. Treat session IDs and cursors as opaque strings.
 

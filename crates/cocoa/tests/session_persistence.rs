@@ -3028,8 +3028,8 @@ async fn empty_search_enforces_its_final_encoded_response_limit() -> Result<(), 
 }
 
 #[tokio::test]
-async fn literal_search_checks_complete_root_messages_controls_and_order()
--> Result<(), Box<dyn Error>> {
+async fn word_search_checks_complete_root_messages_controls_and_order() -> Result<(), Box<dyn Error>>
+{
     let mut fixture = Fixture::empty().await?;
     let mut sessions = Vec::new();
     for index in 0..55 {
@@ -3074,7 +3074,7 @@ async fn literal_search_checks_complete_root_messages_controls_and_order()
         .collect();
     let result = fixture
         .database
-        .search_sessions(None, "  PATH_A% or \"literal\"  ", 50)
+        .search_sessions(None, "  \"literal\"\u{2003}PATH_A%\tOR  ", 50)
         .await?;
     assert_eq!(
         result
@@ -3087,7 +3087,33 @@ async fn literal_search_checks_complete_root_messages_controls_and_order()
     assert_eq!(
         fixture
             .database
-            .search_sessions(None, "café", 5)
+            .search_sessions(None, "or path_a% \"literal\"", 50)
+            .await?,
+        result
+    );
+    assert!(
+        fixture
+            .database
+            .search_sessions(None, "path_a% missing café", 50)
+            .await?
+            .sessions
+            .is_empty()
+    );
+    let title = fixture
+        .database
+        .search_sessions(None, "54 TITLE", 50)
+        .await?;
+    assert_eq!(title.sessions.len(), 1);
+    assert_eq!(title.sessions[0].session.id, sessions[54].0);
+    assert_eq!(
+        title.sessions[0].source,
+        cocoa::persistence::SearchSource::Title
+    );
+    assert_eq!(title.sessions[0].snippet, "title 54");
+    assert_eq!(
+        fixture
+            .database
+            .search_sessions(None, "café CAFÉ", 5)
             .await?
             .sessions
             .len(),
@@ -3158,18 +3184,33 @@ async fn literal_search_checks_complete_root_messages_controls_and_order()
         .await?;
     store
         .append(
-            &input(&format!("{}tail needle", "x".repeat(256 * 1024)), 5),
+            &input(
+                &format!(
+                    "{}tail {}needle",
+                    "x".repeat(256 * 1024),
+                    "context ".repeat(40)
+                ),
+                5,
+            ),
             None,
         )
         .await?;
     let long = fixture
         .database
-        .search_sessions(None, "tail needle", 50)
+        .search_sessions(None, "needle tail", 50)
         .await?;
     assert_eq!(long.sessions.len(), 1);
     assert_eq!(long.sessions[0].session.id, last.0);
-    assert!(long.sessions[0].snippet.contains("tail needle"));
+    assert!(long.sessions[0].snippet.contains("tail "));
+    assert!(!long.sessions[0].snippet.contains("needle"));
     assert!(long.sessions[0].snippet.len() <= 2048);
+    assert_eq!(
+        fixture
+            .database
+            .search_sessions(None, "tail needle", 50)
+            .await?,
+        long
+    );
     let large = fixture
         .database
         .agent_store(
@@ -3205,7 +3246,7 @@ async fn literal_search_checks_complete_root_messages_controls_and_order()
         .await?;
     let found = fixture
         .database
-        .search_sessions(None, "large continuation answer", 50)
+        .search_sessions(None, "answer large", 50)
         .await?;
     assert_eq!(found.sessions.len(), 1);
     assert_eq!(found.sessions[0].session.id, last.0);

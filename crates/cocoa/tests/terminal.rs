@@ -520,9 +520,10 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     let before_resume = session_page(&home, None)?;
     resumed.command(&format!("/resume {}", identity.to_ascii_uppercase()))?;
     resumed.command("/sessions")?;
-    resumed.wait_text("Up to 50 results")?;
+    resumed.wait_text("1 session · This project")?;
+    capture_session_view(&mut resumed, "session-picker-default")?;
     resumed.key(b"\x1b")?;
-    resumed.until(|terminal| !terminal.contains("Up to 50 results"))?;
+    resumed.until(|terminal| !terminal.contains("Resume session"))?;
     assert!(resumed.contains("root-sentinel first conversation"));
     assert!(resumed.contains("continue after restart"));
     assert!(resumed.contains("answer-4"));
@@ -568,10 +569,15 @@ fn durable_conversations_resume_without_replay_and_switch_after_preflight() -> i
     assert!(!resumed.contains("other conversation"));
     assert_eq!(server.requests()?.len(), 6);
     resumed.command("/sessions root-sentinel first")?;
-    resumed.wait_text("Up to 50 results")?;
-    capture_session_view(&mut resumed, "session-picker-search")?;
+    resumed.wait_text("1 session · This project")?;
     assert!(resumed.contains("root-sentinel first conversation"));
     assert!(!resumed.contains("other conversation"));
+    resumed.key(b"\x15")?;
+    resumed.key(b"answer-4")?;
+    resumed.wait_text("Assistant: answer-4")?;
+    assert!(resumed.contains("root-sentinel first conversation"));
+    assert!(!resumed.contains("other conversation"));
+    capture_session_view(&mut resumed, "session-picker-search")?;
     resumed.resize(70, 24)?;
     resumed.key(b"")?;
     resumed.wait_text("root-sentinel first conversation")?;
@@ -633,6 +639,64 @@ fn switching_waits_for_delegated_work_without_cancelling_it() -> io::Result<()> 
     );
     assert_eq!(server.requests()?.len(), 3);
     close_command_session(&mut session)?;
+    server.finish()
+}
+
+#[test]
+fn resume_picker_scrolls_and_keeps_message_matches_visible() -> io::Result<()> {
+    let root = Homes::new()?;
+    let server = Provider::start(ProviderKind::Commands)?;
+    let home = root.command_home("picker-scrolling", &server.endpoint, true, None)?;
+    let mut session = Terminal::spawn(&home, &[], 90, 28, None)?;
+    session.wait_text("medium · fixture-model high")?;
+    for index in 0..12 {
+        session.command(&format!("Conversation {index:02}"))?;
+        session.wait_text(&format!("answer-{}", index + 1))?;
+        if index < 11 {
+            session.command("/new")?;
+        }
+    }
+    session.command(&format!(
+        "{}needle-11 at the end",
+        "Earlier context. ".repeat(20)
+    ))?;
+    session.wait_text("answer-13")?;
+    close_command_session(&mut session)?;
+    let mut picker = Terminal::spawn(&home, &["resume"], 90, 28, None)?;
+    picker.wait_text("12 sessions · This project")?;
+    assert!(picker.contains("Conversation 11"));
+    assert!(!picker.contains("Conversation 00"));
+    capture_session_view(&mut picker, "session-picker-many")?;
+    picker.resize(70, 12)?;
+    picker.key(b"")?;
+    picker.wait_text("Conversation 11")?;
+    capture_session_view(&mut picker, "session-picker-short")?;
+    picker.resize(90, 28)?;
+    for _ in 0..11 {
+        picker.key(b"\x1b[B")?;
+    }
+    picker.wait_text("Conversation 00")?;
+    assert!(!picker.contains("Conversation 11"));
+    picker.key(b"end needle-11")?;
+    picker.wait_text("1 session · This project")?;
+    picker.resize(70, 24)?;
+    picker.key(b"")?;
+    assert!(
+        picker
+            .screen()
+            .lines()
+            .any(|line| line.contains("You:") && line.contains("needle-11 at the end")),
+        "{}",
+        picker.screen()
+    );
+    capture_session_view(&mut picker, "session-picker-message-match")?;
+    picker.key(b"\r")?;
+    picker.wait_text("Conversation 11")?;
+    picker.wait_text("needle-11 at the end")?;
+    assert!(!picker.contains("Resume session"));
+    assert!(!picker.contains("Conversation 01"));
+    close_command_session(&mut picker)?;
+    assert_eq!(server.requests()?.len(), 13);
     server.finish()
 }
 
@@ -705,16 +769,31 @@ async fn resume_picker_last_and_relocation_never_create_a_conversation() -> io::
         36,
         None,
     )?;
-    picker.wait_text("Up to 50 results")?;
+    picker.wait_text("2 sessions · All projects")?;
     assert!(picker.contains("Local session"));
-    assert!(!picker.contains("Other directory session"));
+    assert!(picker.contains("Other directory session"));
     assert!(!picker.contains(&local_id));
     assert!(!picker.contains(&other_id));
+    capture_session_view(&mut picker, "session-picker-all")?;
     picker.key(b"	")?;
-    picker.wait_text("Up to 50 results")?;
+    picker.wait_text("1 session · This project")?;
     assert!(!picker.contains("Other directory session"));
     picker.key(b"Other")?;
     picker.wait_text("No sessions found.")?;
+    assert!(!picker.contains("Local session"));
+    capture_session_view(&mut picker, "session-picker-no-matches")?;
+    picker.key(b"\t")?;
+    picker.wait_text("1 session · All projects")?;
+    assert!(picker.contains("Other directory session"));
+    assert!(picker.contains("Title: Other directory session"));
+    picker.key(b"\x15")?;
+    picker.key("猫".repeat(40).as_bytes())?;
+    picker.wait_text("No sessions found.")?;
+    capture_session_view(&mut picker, "session-picker-long-query")?;
+    picker.key(b"\x15not-a-match\x15LoCaL")?;
+    picker.wait_text("1 session · All projects")?;
+    assert!(picker.contains("Local session"));
+    assert!(!picker.contains("Other directory session"));
     picker.key(b"")?;
     picker.finish(0)?;
     let mut scoped = Terminal::spawn(
@@ -726,6 +805,10 @@ async fn resume_picker_last_and_relocation_never_create_a_conversation() -> io::
     )?;
     scoped.wait_text("Ready")?;
     assert!(!scoped.contains("Session sess_"));
+    scoped.command("/resume --all")?;
+    scoped.wait_text("2 sessions · All projects")?;
+    assert!(scoped.contains("Other directory session"));
+    scoped.key(b"\x1b")?;
     close_command_session(&mut scoped)?;
     let moved = home.join("moved-project");
     fs::rename(&old_directory, &moved)?;
