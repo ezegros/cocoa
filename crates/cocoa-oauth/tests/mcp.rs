@@ -14,6 +14,184 @@ use wiremock::{
 };
 
 #[tokio::test]
+async fn scope_selection_omits_empty_scopes_and_preserves_resource_scopes()
+-> Result<(), Box<dyn Error>> {
+    for (scopes, expected) in [
+        (None, None),
+        (Some(json!([])), None),
+        (
+            Some(json!(["tools:read", "logs:read"])),
+            Some("tools:read logs:read"),
+        ),
+    ] {
+        let remote = MockServer::start().await;
+        let resource = format!("{}/mcp", remote.uri());
+        let mut metadata = json!({
+            "resource": resource, "authorization_servers": [remote.uri()]
+        });
+        if let Some(scopes) = scopes {
+            metadata["scopes_supported"] = scopes;
+        }
+        Mock::given(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+            .mount(&remote)
+            .await;
+        Mock::given(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issuer": remote.uri(),
+                "authorization_endpoint": format!("{}/authorize", remote.uri()),
+                "token_endpoint": format!("{}/token", remote.uri()),
+                "registration_endpoint": format!("{}/register", remote.uri()),
+                "code_challenge_methods_supported": ["S256"],
+                "scopes_supported": ["mcp_all"]
+            })))
+            .mount(&remote)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/register"))
+            .respond_with(move |request: &Request| {
+                let Ok(body) = request.body_json::<Value>() else {
+                    return ResponseTemplate::new(400);
+                };
+                assert_eq!(body["application_type"], "native");
+                assert_eq!(body.get("scope").and_then(Value::as_str), expected);
+                ResponseTemplate::new(201).set_body_json(json!({"client_id":"public-client"}))
+            })
+            .expect(1)
+            .mount(&remote)
+            .await;
+        let directory = tempfile::tempdir()?;
+        let client = McpOAuthClient::new(&resource, directory.path().join("oauth/mcp.json"), None)?;
+        let login = client.begin(None).await?;
+        let query: BTreeMap<_, _> = Url::parse(login.authorization_url().expose_secret())?
+            .query_pairs()
+            .into_owned()
+            .collect();
+        assert_eq!(query.get("scope").map(String::as_str), expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_client_registration_reports_the_required_setup() -> Result<(), Box<dyn Error>>
+{
+    for registration in [None, Some("client_secret_post")] {
+        let remote = MockServer::start().await;
+        let resource = format!("{}/mcp", remote.uri());
+        Mock::given(path("/.well-known/oauth-protected-resource/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "resource": resource, "authorization_servers": [remote.uri()]
+            })))
+            .mount(&remote)
+            .await;
+        let mut metadata = json!({
+            "issuer": remote.uri(),
+            "authorization_endpoint": format!("{}/authorize", remote.uri()),
+            "token_endpoint": format!("{}/token", remote.uri()),
+            "token_endpoint_auth_methods_supported": ["client_secret_post"],
+            "code_challenge_methods_supported": ["S256"]
+        });
+        if registration.is_some() {
+            metadata["registration_endpoint"] = json!(format!("{}/register", remote.uri()));
+        }
+        Mock::given(path("/.well-known/oauth-authorization-server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
+            .mount(&remote)
+            .await;
+        Mock::given(path("/register"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "client_id": "confidential-client", "token_endpoint_auth_method": registration
+            })))
+            .mount(&remote)
+            .await;
+        let directory = tempfile::tempdir()?;
+        let client = McpOAuthClient::new(&resource, directory.path().join("oauth/mcp.json"), None)?;
+        let result = client.begin(None).await;
+        if registration.is_some() {
+            assert!(matches!(result, Err(OAuthError::ClientAuthentication)));
+        } else {
+            assert!(matches!(result, Err(OAuthError::ClientRegistration)));
+            let configured = McpOAuthClient::new(
+                &resource,
+                directory.path().join("oauth/configured.json"),
+                Some("public-client".into()),
+            )?;
+            assert!(configured.begin(None).await.is_ok());
+        }
+        assert!(client.access_token().await?.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_callbacks_display_sanitized_errors_without_saving_tokens()
+-> Result<(), Box<dyn Error>> {
+    let remote = MockServer::start().await;
+    let resource = format!("{}/mcp", remote.uri());
+    Mock::given(path("/.well-known/oauth-protected-resource/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "resource": resource, "authorization_servers": [remote.uri()]
+        })))
+        .mount(&remote)
+        .await;
+    Mock::given(path("/.well-known/oauth-authorization-server"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "issuer": remote.uri(),
+            "authorization_endpoint": format!("{}/authorize", remote.uri()),
+            "token_endpoint": format!("{}/token", remote.uri()),
+            "code_challenge_methods_supported": ["S256"]
+        })))
+        .mount(&remote)
+        .await;
+    let directory = tempfile::tempdir()?;
+    let client = McpOAuthClient::new(
+        &resource,
+        directory.path().join("oauth/mcp.json"),
+        Some("public-client".into()),
+    )?;
+    for error in ["invalid_scope", "access_denied", "untrusted-provider-value"] {
+        let login = client.begin(None).await?;
+        let query: BTreeMap<_, _> = Url::parse(login.authorization_url().expose_secret())?
+            .query_pairs()
+            .into_owned()
+            .collect();
+        let completion = tokio::spawn(login.finish(CancellationToken::new()));
+        let mut callback = Url::parse(&query["redirect_uri"])?;
+        callback.query_pairs_mut().extend_pairs([
+            ("state", "wrong"),
+            ("error", error),
+            ("error_description", "untrusted-provider-description"),
+        ]);
+        let response = reqwest::get(callback.clone()).await?;
+        assert_eq!(response.status().as_u16(), 400);
+        assert!(response.text().await?.contains("Invalid callback"));
+        assert!(!completion.is_finished());
+        callback.query_pairs_mut().clear().extend_pairs([
+            ("state", query["state"].as_str()),
+            ("error", error),
+            ("error_description", "untrusted-provider-description"),
+        ]);
+        let response = reqwest::get(callback).await?;
+        assert_eq!(response.status().as_u16(), 400);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let body = response.text().await?;
+        assert!(body.contains("Sign-in failed:"));
+        assert!(!body.contains("finish sign-in"));
+        assert!(!body.contains("untrusted-provider"));
+        let result = tokio::time::timeout(Duration::from_secs(5), completion).await??;
+        if error == "invalid_scope" {
+            assert!(body.contains("invalid_scope"));
+            assert!(matches!(result, Err(OAuthError::InvalidScope)));
+        } else {
+            assert!(body.contains("Sign-in was denied"));
+            assert!(matches!(result, Err(OAuthError::Denied)));
+        }
+        assert!(client.access_token().await?.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn login_token_lifetime_includes_time_waiting_to_persist() -> Result<(), Box<dyn Error>> {
     let remote = MockServer::start().await;
     let resource = format!("{}/mcp", remote.uri());
@@ -150,7 +328,14 @@ async fn resource_pkce_callback_and_refresh_are_isolated_and_cancel_safe()
         callback
             .query_pairs_mut()
             .extend_pairs([("state", query["state"].as_str()), ("code", "one-use-code")]);
-        assert_eq!(http.get(callback).send().await?.status().as_u16(), 200);
+        let response = http.get(callback).send().await?;
+        assert_eq!(response.status().as_u16(), 200);
+        assert!(
+            response
+                .text()
+                .await?
+                .contains("Return to Cocoa to finish sign-in")
+        );
         completion.await??;
         let initial: Value = serde_json::from_slice(&std::fs::read(&store)?)?;
         assert_eq!(

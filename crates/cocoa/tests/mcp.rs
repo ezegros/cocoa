@@ -84,7 +84,10 @@ fn cli_presets_are_offline_defaults_and_save_independent_grants() -> Result<(), 
     let output = run(&["mcp", "presets", "--json"])?;
     assert!(output.status.success());
     let presets: Vec<Value> = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(presets.len(), 25);
+    assert_eq!(
+        presets,
+        serde_json::from_str::<Vec<Value>>(include_str!("snapshots/mcp-presets.json"))?
+    );
     assert!(!home.path().join(".config/cocoa").exists());
     let mut names = std::collections::BTreeSet::new();
     for preset in &presets {
@@ -109,7 +112,7 @@ fn cli_presets_are_offline_defaults_and_save_independent_grants() -> Result<(), 
         ("notion", None, "https://mcp.notion.com/mcp"),
         ("work-docs", Some("notion"), "https://mcp.notion.com/mcp"),
         ("github", None, "https://api.githubcopilot.com/mcp/"),
-        ("vercel", None, "https://mcp.vercel.com"),
+        ("stripe", None, "https://mcp.stripe.com"),
         ("paypal", None, "https://mcp.paypal.com/http"),
     ] {
         let mut arguments = vec!["mcp", "add", name, "--no-connect"];
@@ -365,7 +368,7 @@ async fn centered_mcp_menu_adds_filters_inspects_disables_and_removes_servers()
         session.wait_text("/ Filter")?;
         session.wait_text("↑↓ select · Enter choose · Esc back")?;
         session.key(b"\r")?;
-        session.wait_text("Add server › 25 presets")?;
+        session.wait_text("Add server › 15 presets")?;
         session.wait_text("› Custom server")?;
         session.text("private-server")?;
         session.wait_text("/ private-server")?;
@@ -381,7 +384,7 @@ async fn centered_mcp_menu_adds_filters_inspects_disables_and_removes_servers()
         session.command("/mcp")?;
         session.wait_text("MCP servers")?;
         session.key(b"\r")?;
-        session.wait_text("Add server › 25 presets")?;
+        session.wait_text("Add server › 15 presets")?;
         session.text("NoTiOn")?;
         session.wait_text("Notion")?;
         session.until(|session| !session.contains("Airtable"))?;

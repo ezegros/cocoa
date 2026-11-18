@@ -70,6 +70,14 @@ pub struct Account {
 pub enum OAuthError {
     #[error("OAuth configuration is invalid")]
     Configuration,
+    #[error(
+        "OAuth server does not offer dynamic registration; configure a pre-registered public client ID or use supported header credentials"
+    )]
+    ClientRegistration,
+    #[error(
+        "OAuth server requires client authentication that Cocoa does not support; use a public client or supported header credentials"
+    )]
+    ClientAuthentication,
     #[error("OAuth storage unavailable; require owner-only directory and regular 0600 files")]
     Storage,
     #[error("OAuth storage is busy; retry later")]
@@ -86,6 +94,8 @@ pub enum OAuthError {
     Cancelled,
     #[error("Sign-in was denied")]
     Denied,
+    #[error("OAuth provider rejected the requested permissions (invalid_scope)")]
+    InvalidScope,
     #[error("Cannot open the system browser")]
     Browser,
     #[error("Cannot listen for the local OAuth callback")]

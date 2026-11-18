@@ -290,7 +290,15 @@ async fn unverified_identity_never_replaces_or_activates_registration() -> TestR
     let login = fixture.client.begin(Some("original".into())).await?;
     let query = parameters(&login)?;
     let pending = tokio::spawn(login.finish(CancellationToken::new()));
-    callback(&query, "different_client").await?;
+    let mut redirect = Url::parse(&query["redirect_uri"])?;
+    redirect.query_pairs_mut().extend_pairs([
+        ("state", query["state"].as_str()),
+        ("code", "one-use-code"),
+        ("client_id", "different_client"),
+    ]);
+    let response = reqwest::get(redirect).await?;
+    assert_eq!(response.status().as_u16(), 400);
+    assert!(response.text().await?.contains("Sign-in failed:"));
     assert!(matches!(pending.await?, Err(OAuthError::Changed)));
     assert_eq!(
         fixture

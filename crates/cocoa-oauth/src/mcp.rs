@@ -188,6 +188,7 @@ impl McpOAuthClient {
         {
             return Err(OAuthError::Configuration);
         }
+        let scopes = resource.scopes_supported.join(" ");
         let mut authorization = safe_url(&metadata.authorization_endpoint)?;
         let token_endpoint = safe_url(&metadata.token_endpoint)?.to_string();
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
@@ -220,16 +221,21 @@ impl McpOAuthClient {
                     metadata
                         .registration_endpoint
                         .as_deref()
-                        .ok_or(OAuthError::Configuration)?,
+                        .ok_or(OAuthError::ClientRegistration)?,
                 )?;
+                let mut registration_metadata = serde_json::json!({
+                    "client_name":"Cocoa", "redirect_uris":[redirect],
+                    "application_type":"native",
+                    "grant_types":["authorization_code", "refresh_token"],
+                    "response_types":["code"], "token_endpoint_auth_method":"none"
+                });
+                if !scopes.is_empty() {
+                    registration_metadata["scope"] = serde_json::Value::String(scopes.clone());
+                }
                 let response = self
                     .http
                     .post(registration)
-                    .json(&serde_json::json!({
-                        "client_name":"Cocoa", "redirect_uris":[redirect],
-                        "grant_types":["authorization_code", "refresh_token"],
-                        "response_types":["code"], "token_endpoint_auth_method":"none"
-                    }))
+                    .json(&registration_metadata)
                     .send()
                     .await
                     .map_err(|_| OAuthError::Network)?;
@@ -237,6 +243,12 @@ impl McpOAuthClient {
                     return Err(OAuthError::Response);
                 }
                 let value: serde_json::Value = bounded_json(response).await?;
+                if value
+                    .get("token_endpoint_auth_method")
+                    .is_some_and(|method| method != "none")
+                {
+                    return Err(OAuthError::ClientAuthentication);
+                }
                 value["client_id"]
                     .as_str()
                     .filter(|id| text(id, 2048))
@@ -250,7 +262,7 @@ impl McpOAuthClient {
             issuer: metadata.issuer,
             token_endpoint,
             client_id,
-            scopes: resource.scopes_supported.join(" "),
+            scopes,
             tokens: saved.and_then(|saved| saved.tokens.clone()),
         };
         store.registration = Some(registration.clone());
@@ -262,7 +274,6 @@ impl McpOAuthClient {
             ("client_id", &registration.client_id),
             ("redirect_uri", &redirect),
             ("resource", &registration.resource),
-            ("scope", &registration.scopes),
             ("state", &state),
             ("code_challenge_method", "S256"),
             (
@@ -270,6 +281,11 @@ impl McpOAuthClient {
                 &BASE64_URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())),
             ),
         ]);
+        if !registration.scopes.is_empty() {
+            authorization
+                .query_pairs_mut()
+                .append_pair("scope", &registration.scopes);
+        }
         Ok(McpLogin {
             client: self.clone(),
             listener,
@@ -455,8 +471,8 @@ impl McpLogin {
     async fn complete(mut self) -> Result<(), OAuthError> {
         let code = browser::receive_callback(&self.listener, |request| {
             let parameters = browser::callback_parameters(request, &self.redirect, &self.state)?;
-            if parameters.contains_key("error") {
-                return Some(Err(OAuthError::Denied));
+            if let Some(error) = parameters.get("error") {
+                return Some(Err(browser::authorization_error(error)));
             }
             if parameters
                 .get("iss")

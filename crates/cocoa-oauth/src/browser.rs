@@ -238,8 +238,8 @@ impl BrowserLogin {
 
     fn parse_callback(&self, request: &str) -> Option<Result<(String, String), OAuthError>> {
         let parameters = callback_parameters(request, &self.redirect, &self.state)?;
-        if parameters.contains_key("error") {
-            return Some(Err(OAuthError::Denied));
+        if let Some(error) = parameters.get("error") {
+            return Some(Err(authorization_error(error)));
         }
         let code = parameters
             .get("code")
@@ -272,15 +272,21 @@ pub(crate) async fn receive_callback<T>(
             Ok(Ok(request)) => parse(&request),
             _ => None,
         };
-        let message = if result.is_some() {
-            "Return to Cocoa to finish sign-in. You may close this tab."
-        } else {
-            "Invalid callback. Return to the original sign-in tab."
-        };
-        let status = if result.is_some() {
-            "200 OK"
-        } else {
-            "400 Bad Request"
+        let (status, message) = match &result {
+            Some(Ok(_)) => (
+                "200 OK",
+                "Return to Cocoa to finish sign-in. You may close this tab.".to_owned(),
+            ),
+            Some(Err(error)) => (
+                "400 Bad Request",
+                format!(
+                    "Sign-in failed: {error}. Return to Cocoa to retry. You may close this tab."
+                ),
+            ),
+            None => (
+                "400 Bad Request",
+                "Invalid callback. Return to the original sign-in tab.".to_owned(),
+            ),
         };
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; frame-ancestors 'none'\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{message}",
@@ -305,6 +311,13 @@ pub(crate) async fn receive_callback<T>(
         }
     }
     Err(OAuthError::Listener)
+}
+
+pub(crate) fn authorization_error(error: &str) -> OAuthError {
+    match error {
+        "invalid_scope" => OAuthError::InvalidScope,
+        _ => OAuthError::Denied,
+    }
 }
 
 pub(crate) fn callback_parameters(

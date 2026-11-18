@@ -1,0 +1,122 @@
+[
+  {
+    "name": "airtable",
+    "title": "Airtable",
+    "url": "https://mcp.airtable.com/mcp",
+    "authentication": "OAuth / token",
+    "setup": "OAuth or scoped personal access token. Organization policies can block MCP access.",
+    "documentation": "https://airtable.com/developers/agents/mcp/other"
+  },
+  {
+    "name": "atlassian",
+    "title": "Atlassian",
+    "url": "https://mcp.atlassian.com/v2/mcp",
+    "authentication": "OAuth",
+    "setup": "Requires Atlassian Cloud access and permitted app policies. The v2 endpoint is untested in Cocoa.",
+    "documentation": "https://support.atlassian.com/atlassian-ai-gateway/docs/configure-oauth-2-1/"
+  },
+  {
+    "name": "clickup",
+    "title": "ClickUp",
+    "url": "https://mcp.clickup.com/mcp",
+    "authentication": "OAuth",
+    "setup": "OAuth with PKCE required; personal API keys are not accepted. All plans supported; rate limits vary.",
+    "documentation": "https://developer.clickup.com/docs/connect-an-ai-assistant-to-clickups-mcp-server"
+  },
+  {
+    "name": "context7",
+    "title": "Context7",
+    "url": "https://mcp.context7.com/mcp",
+    "authentication": "CLI API key",
+    "setup": "Use an API key via CLI --header-env Authorization=ENV. OAuth uses https://mcp.context7.com/mcp/oauth instead.",
+    "documentation": "https://context7.com/docs/resources/all-clients"
+  },
+  {
+    "name": "datadog",
+    "title": "Datadog",
+    "url": "https://mcp.datadoghq.com/v1/mcp",
+    "authentication": "US1 / CLI token",
+    "setup": "US1 default: change URL for your region. Use a personal/service bearer token via CLI. OAuth is unverified; redirect approval may be required.",
+    "documentation": "https://docs.datadoghq.com/mcp_server/setup/"
+  },
+  {
+    "name": "github",
+    "title": "GitHub",
+    "url": "https://api.githubcopilot.com/mcp/",
+    "authentication": "CLI personal token",
+    "setup": "Use a personal access token via CLI --header-env Authorization=ENV. The documented OAuth app flow needs a client secret, unsupported by Cocoa.",
+    "documentation": "https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md"
+  },
+  {
+    "name": "intercom",
+    "title": "Intercom",
+    "url": "https://mcp.intercom.com/mcp",
+    "authentication": "US / OAuth / token",
+    "setup": "US default. EU: https://mcp.eu.intercom.com/mcp. AU unsupported. Use OAuth or an API bearer token.",
+    "documentation": "https://developers.intercom.com/docs/guides/mcp"
+  },
+  {
+    "name": "linear",
+    "title": "Linear",
+    "url": "https://mcp.linear.app/mcp",
+    "authentication": "OAuth / token",
+    "setup": "Sign in with OAuth, or use an API bearer token via CLI. Read-only alternative: https://mcp.linear.app/mcp/readonly.",
+    "documentation": "https://linear.app/docs/mcp"
+  },
+  {
+    "name": "miro",
+    "title": "Miro",
+    "url": "https://mcp.miro.com/",
+    "authentication": "OAuth unverified",
+    "setup": "Authorize the board's team. Public-client OAuth is unverified in Cocoa. Enterprise admins must enable MCP. New team/client consent can replace the old.",
+    "documentation": "https://developers.miro.com/docs/connecting-to-miro-mcp"
+  },
+  {
+    "name": "monday",
+    "title": "monday.com",
+    "url": "https://mcp.monday.com/mcp",
+    "authentication": "Token / approval",
+    "setup": "Personal API bearer token for personal use/testing. OAuth depends on account MCP access and local-connector/admin policy.",
+    "documentation": "https://developer.monday.com/api-reference/docs/integrate-with-monday-mcp"
+  },
+  {
+    "name": "notion",
+    "title": "Notion",
+    "url": "https://mcp.notion.com/mcp",
+    "authentication": "OAuth",
+    "setup": "Sign in with OAuth and choose the workspace/pages Cocoa may access.",
+    "documentation": "https://developers.notion.com/guides/mcp/build-mcp-client"
+  },
+  {
+    "name": "paypal",
+    "title": "PayPal",
+    "url": "https://mcp.paypal.com/http",
+    "authentication": "Live / OAuth",
+    "setup": "Live account default. For testing use https://mcp.sandbox.paypal.com/http. Sign in and authorize PayPal.",
+    "documentation": "https://developer.paypal.com/ai-tools/mcp-server.md"
+  },
+  {
+    "name": "sentry",
+    "title": "Sentry",
+    "url": "https://mcp.sentry.dev/mcp",
+    "authentication": "OAuth",
+    "setup": "OAuth requests write permissions. For organization/project scoping, use https://mcp.sentry.dev/mcp/ORG/PROJECT.",
+    "documentation": "https://mcp.sentry.dev/llms.txt"
+  },
+  {
+    "name": "stripe",
+    "title": "Stripe",
+    "url": "https://mcp.stripe.com",
+    "authentication": "OAuth / agent key",
+    "setup": "Use OAuth or an agent API bearer key. Account admins can disable MCP. Ordinary secret keys are being retired.",
+    "documentation": "https://docs.stripe.com/mcp"
+  },
+  {
+    "name": "supabase",
+    "title": "Supabase",
+    "url": "https://mcp.supabase.com/mcp",
+    "authentication": "CLI PAT / unscoped",
+    "setup": "Use a personal access token as a CLI bearer header; OAuth is unverified. Unscoped, not read-only: Cocoa does not support project/read-only query parameters.",
+    "documentation": "https://supabase.com/docs/guides/ai-tools/mcp"
+  }
+]
