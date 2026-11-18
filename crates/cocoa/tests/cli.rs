@@ -1498,6 +1498,7 @@ async fn startup_fallback_orders_root_and_child_choices_and_pins_resume()
             "root-fallback",
             "root-fallback",
             "root-fallback",
+            "root-fallback",
         ]
         .into_iter()
         .enumerate()
@@ -1526,7 +1527,7 @@ async fn startup_fallback_orders_root_and_child_choices_and_pins_resume()
                         "text/event-stream",
                         &execution(
                             round,
-                            "var child = await cocoa.spawn({name:'worker',alias:'child',prompt:'Check startup fallback'}); print(await cocoa.wait(child));",
+                            "var child = await cocoa.spawn({name:'worker',alias:'child',prompt:'Check startup fallback'}); print(await cocoa.wait(child)); var inherited = await cocoa.spawn({name:'inherited',prompt:'Check inherited fallback'}); print(await cocoa.wait(inherited));",
                         ),
                     )?;
                 }
@@ -1539,19 +1540,28 @@ async fn startup_fallback_orders_root_and_child_choices_and_pins_resume()
                     )?;
                 }
                 6 => {
+                    assert_eq!(body["reasoning"]["effort"], "high");
+                    respond(
+                        &mut stream,
+                        "text/event-stream",
+                        &completion("inherited fallback verified"),
+                    )?;
+                }
+                7 => {
                     assert!(body.to_string().contains("child fallback verified"));
+                    assert!(body.to_string().contains("inherited fallback verified"));
                     respond(
                         &mut stream,
                         "text/event-stream",
                         &completion("startup fallback verified"),
                     )?;
                 }
-                7 => respond(
+                8 => respond(
                     &mut stream,
                     "text/event-stream",
                     &completion("same model verified"),
                 )?,
-                8 => respond(
+                9 => respond(
                     &mut stream,
                     "text/event-stream",
                     &completion("resumed fallback verified"),

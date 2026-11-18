@@ -11,7 +11,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use cocoa::agents::{AgentFactory, AgentLimits, AgentManager, AgentParticipant, AgentUpdateKind};
+use cocoa::agents::{
+    AgentFactory, AgentLimits, AgentManager, AgentParticipant, AgentSelection, AgentUpdateKind,
+};
 use cocoa::persistence::{AgentAssignment, SessionDatabase, SqliteStore};
 use cocoa_core::{
     capability::{
@@ -1579,6 +1581,44 @@ async fn cancellation_targets_work_not_waiters_or_parent_invocations() -> Result
 }
 
 #[tokio::test]
+async fn spawn_passes_optional_model_and_thinking_overrides() -> Result<(), Box<dyn Error>> {
+    let factory = Arc::new(Factory::new([
+        (
+            "inherited",
+            Arc::new(Script::new(vec![Step::Answer("done")], false)),
+        ),
+        (
+            "explicit",
+            Arc::new(Script::new(vec![Step::Answer("done")], false)),
+        ),
+    ]));
+    let manager = manager(factory.clone(), 2, 2)?;
+    let host = manager.bind("medium".into(), Arc::new(EmptyHost))?;
+    for arguments in [
+        json!({"name":"inherited","prompt":"work"}),
+        json!({"name":"explicit","prompt":"work","model":"gpt-5","thinking_level":"high"}),
+    ] {
+        let receipt = call(&host, "cocoa.spawn", arguments).await?;
+        let result = wait(&host, json!({"worker":receipt["reference"]}), None, 4096).await?;
+        assert_eq!(result["worker"]["status"], "completed");
+    }
+    let selections = factory.selections.lock().await;
+    assert_eq!(selections.len(), 2);
+    assert!(selections[0].alias.is_none());
+    assert!(selections[0].model.is_none());
+    assert!(selections[0].thinking_level.is_none());
+    assert!(selections[1].alias.is_none());
+    assert_eq!(selections[1].model.as_deref(), Some("gpt-5"));
+    assert_eq!(
+        selections[1].thinking_level,
+        Some(cocoa_llm::ThinkingLevel::High)
+    );
+    drop(selections);
+    manager.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn admission_is_atomic_and_handles_are_authorized() -> Result<(), Box<dyn Error>> {
     let blocked = Arc::new(Script::new(vec![Step::Answer("done")], true));
     let factory = Arc::new(Factory::new([
@@ -1593,6 +1633,11 @@ async fn admission_is_atomic_and_handles_are_authorized() -> Result<(), Box<dyn 
         json!({"name":"a b","prompt":"work"}),
         json!({"name":"x".repeat(65),"prompt":"work"}),
         json!({"name":"worker","prompt":" "}),
+        json!({"name":"worker","prompt":"work","model":" "}),
+        json!({"name":"worker","prompt":"work","model":null}),
+        json!({"name":"worker","prompt":"work","thinking_level":null}),
+        json!({"name":"worker","prompt":"work","thinking_level":"unknown"}),
+        json!({"name":"worker","prompt":"work","thinking_level":3}),
     ] {
         assert!(
             matches!(call(&host,"cocoa.spawn",arguments).await,Err(CapabilityError::Tool {code,..}) if code=="invalid_arguments")
@@ -2032,6 +2077,7 @@ async fn quickjs() -> Result<QuickJsExecutor, cocoa_quickjs::QuickJsError> {
 struct Factory {
     models: BTreeMap<String, Arc<Script>>,
     forward_observations: bool,
+    selections: Mutex<Vec<AgentSelection>>,
     created: AtomicUsize,
     closed: Mutex<Vec<String>>,
     setup_entered: Semaphore,
@@ -2048,6 +2094,7 @@ impl Factory {
                 .map(|(name, model)| (name.into(), model))
                 .collect(),
             forward_observations: false,
+            selections: Mutex::new(Vec::new()),
             created: AtomicUsize::new(0),
             closed: Mutex::new(Vec::new()),
             setup_entered: Semaphore::new(0),
@@ -2060,6 +2107,22 @@ impl Factory {
 
 #[async_trait]
 impl AgentFactory for Factory {
+    fn validate_selection(
+        &self,
+        default_alias: &str,
+        selection: &AgentSelection,
+    ) -> Result<(), CapabilityError> {
+        if self.supports_alias(selection.alias.as_deref().unwrap_or(default_alias)) {
+            Ok(())
+        } else {
+            Err(CapabilityError::Tool {
+                code: "alias_unavailable".into(),
+                message: "alias is not configured".into(),
+                effects: Effects::None,
+            })
+        }
+    }
+
     fn supports_alias(&self, alias: &str) -> bool {
         matches!(alias, "medium" | "high")
     }
@@ -2067,10 +2130,11 @@ impl AgentFactory for Factory {
     async fn create(
         &self,
         participant: AgentParticipant,
-        _alias: &str,
+        selection: &AgentSelection,
         limits: Limits,
         cancellation: CancellationToken,
     ) -> Result<Engine, CapabilityError> {
+        self.selections.lock().await.push(selection.clone());
         let name = participant.name();
         self.created.fetch_add(1, Ordering::SeqCst);
         if name == "setup_wait" {

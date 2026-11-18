@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use cocoa::agents::{AgentFactory, AgentParticipant};
+use cocoa::agents::{AgentFactory, AgentParticipant, AgentSelection};
 use cocoa_core::{
     capability::{CapabilityError, Effects},
     compaction::CompactionPolicy,
@@ -19,12 +19,19 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::ResolvedAlias;
 
+/// Captured alias choices and the live caller profile used for child selection.
+pub struct AgentModels {
+    pub aliases: BTreeMap<String, Vec<ResolvedAlias>>,
+    pub caller: Arc<crate::session::startup_model::StartupModel>,
+}
+
 /// Each child owns its provider, JavaScript heap, history and coding environment.
 /// Child capabilities exclude agent management. History and coding environments
 /// outlive finished engines, preserving evidence and output until session closure.
 /// The manager must shut down each engine before calling `close`.
 pub struct LocalAgentFactory {
     aliases: BTreeMap<String, Vec<ResolvedAlias>>,
+    caller: Arc<crate::session::startup_model::StartupModel>,
     store: StoreLimits,
     compaction: CompactionPolicy,
     working_directory: PathBuf,
@@ -41,7 +48,7 @@ impl LocalAgentFactory {
     /// at 32 children, including environments awaiting a cleanup retry.
     #[must_use]
     pub fn new(
-        aliases: BTreeMap<String, Vec<ResolvedAlias>>,
+        models: AgentModels,
         store: StoreLimits,
         compaction: CompactionPolicy,
         working_directory: PathBuf,
@@ -49,13 +56,14 @@ impl LocalAgentFactory {
         session_id: String,
         mcp: cocoa::mcp::McpManager,
     ) -> Self {
-        for alias in aliases.values().flatten() {
+        for alias in models.aliases.values().flatten() {
             if let Some(reference) = alias.credential_env() {
                 environment.remove(reference);
             }
         }
         Self {
-            aliases,
+            aliases: models.aliases,
+            caller: models.caller,
             store,
             compaction,
             working_directory,
@@ -70,7 +78,7 @@ impl LocalAgentFactory {
     /// histories are bound through their admitted participant, never their name.
     #[must_use]
     pub fn new_durable(
-        aliases: BTreeMap<String, Vec<ResolvedAlias>>,
+        models: AgentModels,
         store: StoreLimits,
         compaction: CompactionPolicy,
         working_directory: PathBuf,
@@ -79,7 +87,7 @@ impl LocalAgentFactory {
         mcp: cocoa::mcp::McpManager,
     ) -> Self {
         Self::new(
-            aliases,
+            models,
             store,
             compaction,
             working_directory,
@@ -87,6 +95,14 @@ impl LocalAgentFactory {
             attachment.public_id().as_str().into(),
             mcp,
         )
+    }
+
+    fn selected_candidates(
+        &self,
+        selection: &AgentSelection,
+    ) -> Result<Vec<ResolvedAlias>, CapabilityError> {
+        crate::config::agent_candidates(self.caller.current_settings(), &self.aliases, selection)
+            .map_err(|_| setup_failed("Invalid child model, thinking level or alias selection"))
     }
 }
 
@@ -96,10 +112,18 @@ impl AgentFactory for LocalAgentFactory {
         self.aliases.contains_key(alias)
     }
 
+    fn validate_selection(
+        &self,
+        _default_alias: &str,
+        selection: &AgentSelection,
+    ) -> Result<(), CapabilityError> {
+        self.selected_candidates(selection).map(|_| ())
+    }
+
     async fn create(
         &self,
         participant: AgentParticipant,
-        alias: &str,
+        selection: &AgentSelection,
         limits: Limits,
         cancellation: CancellationToken,
     ) -> Result<Engine, CapabilityError> {
@@ -117,11 +141,7 @@ impl AgentFactory for LocalAgentFactory {
                 "Child agent ownership limit or identity conflict",
             ));
         }
-        let alias = self
-            .aliases
-            .get(alias)
-            .ok_or_else(|| setup_failed("Agent alias is not configured"))?
-            .clone();
+        let alias = self.selected_candidates(selection)?;
         if self.session_id.is_empty()
             || self.session_id.len() > 108
             || !self

@@ -96,7 +96,7 @@ impl Session {
             .engine
             .compaction()
             .ok_or(config::ConfigError::Bounds)?;
-        let provider = startup_model::StartupModel::new(
+        let provider = Arc::new(startup_model::StartupModel::new(
             configuration
                 .candidates
                 .get(&alias)
@@ -105,7 +105,7 @@ impl Session {
             &session_id,
             compaction.request_bytes,
             Some(store.clone()),
-        )?;
+        )?);
         let input_bytes = configuration.engine.limits().input_bytes;
         let shutdown_timeout = configuration.engine.limits().shutdown_timeout;
         let (events, _) = EventPublisher::channel(64, 4096).map_err(CommandError::Events)?;
@@ -116,7 +116,10 @@ impl Session {
             },
             configuration.engine.limits(),
             Arc::new(agent_factory::LocalAgentFactory::new_durable(
-                configuration.candidates,
+                agent_factory::AgentModels {
+                    aliases: configuration.candidates,
+                    caller: provider.clone(),
+                },
                 configuration.store,
                 compaction,
                 working_directory.clone(),
@@ -183,7 +186,7 @@ impl Session {
             .await
             .map_err(CommandError::Executor)?;
             let adapters = EngineAdapters {
-                model: Arc::new(provider),
+                model: provider,
                 executor: Box::new(executor),
                 capabilities,
                 context: agents.bind_context(environment.clone()),

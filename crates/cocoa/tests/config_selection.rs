@@ -6,6 +6,146 @@ use serde_json::json;
 use std::{error::Error, fs, process::Command};
 
 #[test]
+fn agent_model_selection_inherits_active_profile() -> Result<(), Box<dyn Error>> {
+    use cocoa::agents::AgentSelection;
+    use cocoa::config::{CredentialSource, ResolvedAlias};
+    use cocoa_llm::{ModelLimits, ProviderKind};
+    use std::collections::BTreeMap;
+
+    let caller = ResolvedAlias {
+        kind: ProviderKind::OpenAi,
+        endpoint: "https://api.openai.com/v1/responses".into(),
+        model: "caller-active".into(),
+        model_limits: ModelLimits {
+            output_tokens: Some(4096),
+            context_tokens: Some(32768),
+        },
+        api_key: Some("test-key".into()),
+        thinking_level: Some(ThinkingLevel::High),
+        reasoning_summary: false,
+        credential_source: CredentialSource::Saved,
+    };
+    let mut configured = caller.clone();
+    configured.model = "configured-alias".into();
+    configured.thinking_level = Some(ThinkingLevel::Low);
+    let aliases = BTreeMap::from([("worker".into(), vec![configured, caller.clone()])]);
+
+    let inherited = config::agent_candidates(caller.clone(), &aliases, &AgentSelection::default())?;
+    assert_eq!(inherited.len(), 1);
+    assert_eq!(inherited[0].model, "caller-active");
+    assert_eq!(inherited[0].thinking_level, Some(ThinkingLevel::High));
+    assert_eq!(inherited[0].model_limits.context_tokens, Some(32768));
+    assert_eq!(inherited[0].endpoint, caller.endpoint);
+
+    let overridden = config::agent_candidates(
+        caller.clone(),
+        &aliases,
+        &AgentSelection {
+            model: Some("openai/explicit".into()),
+            ..AgentSelection::default()
+        },
+    )?;
+    assert_eq!(overridden.len(), 1);
+    assert_eq!(overridden[0].model, "explicit");
+    assert_eq!(overridden[0].thinking_level, Some(ThinkingLevel::High));
+    assert_eq!(overridden[0].model_limits.context_tokens, None);
+
+    let thinking = config::agent_candidates(
+        caller.clone(),
+        &aliases,
+        &AgentSelection {
+            thinking_level: Some(ThinkingLevel::Low),
+            ..AgentSelection::default()
+        },
+    )?;
+    assert_eq!(thinking[0].model, "caller-active");
+    assert_eq!(thinking[0].thinking_level, Some(ThinkingLevel::Low));
+
+    let aliased = config::agent_candidates(
+        caller.clone(),
+        &aliases,
+        &AgentSelection {
+            alias: Some("worker".into()),
+            ..AgentSelection::default()
+        },
+    )?;
+    assert_eq!(aliased.len(), 2);
+    assert_eq!(aliased[0].model, "configured-alias");
+    assert_eq!(aliased[0].thinking_level, Some(ThinkingLevel::Low));
+
+    let explicit = config::agent_candidates(
+        caller.clone(),
+        &aliases,
+        &AgentSelection {
+            alias: Some("worker".into()),
+            model: Some("explicit".into()),
+            thinking_level: Some(ThinkingLevel::High),
+        },
+    )?;
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(explicit[0].model, "explicit");
+    assert_eq!(explicit[0].thinking_level, Some(ThinkingLevel::High));
+
+    let mut other_provider = caller.clone();
+    other_provider.kind = ProviderKind::OpenRouter;
+    other_provider.endpoint = "https://openrouter.ai/api/v1/responses".into();
+    other_provider.api_key = Some("other-key".into());
+    other_provider.credential_source = CredentialSource::Environment {
+        reference: "OPENROUTER_API_KEY".into(),
+    };
+    let other_aliases = BTreeMap::from([("other".into(), vec![other_provider.clone()])]);
+    let cross_provider = config::agent_candidates(
+        caller.clone(),
+        &other_aliases,
+        &AgentSelection {
+            model: Some("openrouter/meta-llama/Llama".into()),
+            ..AgentSelection::default()
+        },
+    )?;
+    assert_eq!(cross_provider.len(), 1);
+    assert_eq!(cross_provider[0].kind, ProviderKind::OpenRouter);
+    assert_eq!(cross_provider[0].model, "meta-llama/Llama");
+    assert_eq!(cross_provider[0].endpoint, other_provider.endpoint);
+    assert_eq!(
+        cross_provider[0]
+            .api_key
+            .as_ref()
+            .map(secrecy::ExposeSecret::expose_secret),
+        Some("other-key")
+    );
+    assert!(matches!(
+        &cross_provider[0].credential_source,
+        CredentialSource::Environment { reference } if reference == "OPENROUTER_API_KEY"
+    ));
+
+    for model in ["", "openai/", "unknown/model", "bad\nmodel"] {
+        assert!(
+            config::agent_candidates(
+                caller.clone(),
+                &aliases,
+                &AgentSelection {
+                    model: Some(model.into()),
+                    ..AgentSelection::default()
+                },
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        config::agent_candidates(
+            caller,
+            &aliases,
+            &AgentSelection {
+                alias: Some("missing".into()),
+                ..AgentSelection::default()
+            },
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn selector_preferences() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let output = Command::new(std::env::current_exe()?)

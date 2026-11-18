@@ -241,6 +241,61 @@ pub fn resume_configuration(
     Ok(configuration)
 }
 
+/// Resolve a child selection from the caller's active profile and captured aliases.
+/// An omitted alias inherits the caller. An explicit model disables alias fallbacks;
+/// qualified models can select another provider captured by a configured alias.
+/// Models containing a slash must use `provider/model`, including namespaced IDs
+/// such as `openrouter/meta-llama/Llama`. Bare models use the selected provider.
+/// Omitted thinking levels retain the selected profile's value.
+///
+/// # Errors
+/// Reject unknown aliases or providers, malformed models and invalid provider settings.
+pub fn agent_candidates(
+    caller: ResolvedAlias,
+    aliases: &BTreeMap<String, Vec<ResolvedAlias>>,
+    selection: &crate::agents::AgentSelection,
+) -> Result<Vec<ResolvedAlias>, ConfigError> {
+    let mut candidates = match &selection.alias {
+        Some(alias) => aliases.get(alias).ok_or(ConfigError::Alias)?.clone(),
+        None => vec![caller],
+    };
+    if let Some(model) = &selection.model {
+        let mut selected = candidates.first().ok_or(ConfigError::AliasChoices)?.clone();
+        let model = if model.contains('/') {
+            let (provider, model) = direct_model(model)?;
+            if selected.kind.to_string() != provider {
+                selected = aliases
+                    .values()
+                    .flatten()
+                    .find(|alias| alias.kind.to_string() == provider)
+                    .ok_or(ConfigError::ProviderReference)?
+                    .clone();
+            }
+            model
+        } else {
+            model.clone()
+        };
+        if model.trim().is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+            return Err(ConfigError::Model);
+        }
+        if selected.model != model {
+            selected.model_limits = ModelLimits::default();
+        }
+        selected.model = model;
+        candidates = vec![selected];
+    }
+    if candidates.is_empty() {
+        return Err(ConfigError::AliasChoices);
+    }
+    for candidate in &mut candidates {
+        if let Some(thinking_level) = selection.thinking_level {
+            candidate.thinking_level = Some(thinking_level);
+        }
+        validate_alias(candidate)?;
+    }
+    Ok(candidates)
+}
+
 impl ResolvedAlias {
     /// Nonsecret execution profile for durable model pinning.
     ///

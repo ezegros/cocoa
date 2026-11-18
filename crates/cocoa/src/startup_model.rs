@@ -60,6 +60,11 @@ impl StartupModel {
         })
     }
 
+    /// Snapshot the active caller profile, including any selected startup fallback.
+    pub(crate) fn current_settings(&self) -> ResolvedAlias {
+        self.current().settings.clone()
+    }
+
     fn current(&self) -> &Choice {
         &self.choices[self.selected.load(Ordering::Acquire)]
     }

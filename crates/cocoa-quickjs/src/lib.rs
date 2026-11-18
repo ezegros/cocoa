@@ -29,7 +29,7 @@
 //! and always report `effects: 'none'`. Owner metadata is never shortened;
 //! feedback uses an explicit truncated fallback if the metadata cannot fit.
 //!
-//! Granted `cocoa.spawn({name, prompt, alias?})` resolves to a frozen, nonthenable
+//! Granted `cocoa.spawn({name, prompt, alias?, model?, thinking_level?})` resolves to a frozen, nonthenable
 //! opaque handle with read-only `name` and `alias` metadata. Handles survive cells
 //! but contain no cell Promise and cannot be reconstructed from copied metadata.
 //! `cocoa.wait(handle, {timeout_ms?})` resolves to one tagged outcome; passing an

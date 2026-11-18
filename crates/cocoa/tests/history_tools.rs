@@ -1008,7 +1008,7 @@ impl AgentFactory for Factory {
     async fn create(
         &self,
         participant: AgentParticipant,
-        _alias: &str,
+        _selection: &cocoa::agents::AgentSelection,
         _limits: Limits,
         _cancellation: CancellationToken,
     ) -> Result<Engine, CapabilityError> {

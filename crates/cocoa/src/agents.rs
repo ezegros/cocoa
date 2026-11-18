@@ -22,6 +22,7 @@ use cocoa_core::{
     execution::{ExecutionError, WorkLimits, host_value_fits},
     store::{AgentId, InvocationId, Record, RecordId, RecordKind, StoreError, StoreLimits},
 };
+use cocoa_llm::ThinkingLevel;
 use futures_util::FutureExt;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -442,6 +443,14 @@ impl AgentParticipant {
     }
 }
 
+/// Optional overrides for a child's inherited model configuration.
+#[derive(Clone, Debug, Default)]
+pub struct AgentSelection {
+    pub alias: Option<String>,
+    pub model: Option<String>,
+    pub thinking_level: Option<ThinkingLevel>,
+}
+
 /// Application-owned construction and cleanup of a child's private adapters.
 /// Creation must settle partially constructed resources before returning an error.
 /// The manager consumes each engine after its invocation, before publishing the
@@ -453,6 +462,27 @@ impl AgentParticipant {
 pub trait AgentFactory: Send + Sync {
     /// Whether this session authorizes the configured alias.
     fn supports_alias(&self, alias: &str) -> bool;
+
+    /// Validate overrides before admitting work, without provider requests.
+    ///
+    /// # Errors
+    /// Reject unavailable aliases or unsupported model overrides.
+    fn validate_selection(
+        &self,
+        default_alias: &str,
+        selection: &AgentSelection,
+    ) -> Result<(), CapabilityError> {
+        if !self.supports_alias(selection.alias.as_deref().unwrap_or(default_alias)) {
+            return Err(tool("alias_unavailable", "alias is not configured"));
+        }
+        if selection.model.is_some() || selection.thinking_level.is_some() {
+            return Err(tool(
+                "invalid_arguments",
+                "model overrides are not supported",
+            ));
+        }
+        Ok(())
+    }
 
     /// Construct a private engine without starting its initial invocation.
     /// Bind its capabilities through `participant.bind` and its context assembler
@@ -469,7 +499,7 @@ pub trait AgentFactory: Send + Sync {
     async fn create(
         &self,
         participant: AgentParticipant,
-        alias: &str,
+        selection: &AgentSelection,
         limits: Limits,
         cancellation: CancellationToken,
     ) -> Result<Engine, CapabilityError>;
@@ -624,6 +654,7 @@ impl AgentManager {
                     name: agent.name,
                     prompt: assignment.prompt,
                     alias: assignment.alias,
+                    selection: AgentSelection::default(),
                     reference: String::new(),
                     creator: Arc::new(()),
                     cancellation: CancellationToken::new(),
@@ -882,6 +913,7 @@ struct Entry {
     name: String,
     prompt: String,
     alias: String,
+    selection: AgentSelection,
     reference: String,
     creator: Arc<()>,
     cancellation: CancellationToken,
@@ -1035,8 +1067,8 @@ impl CapabilityHost for ManagedCapabilities {
         descriptions.extend([
             CapabilityDescription {
                 name: "cocoa.spawn".into(),
-                description: "Call var worker = await cocoa.spawn({name:'worker',prompt:'Complete task instructions'}), with optional alias in that same object. Returns an opaque handle after acceptance, before setup or execution finishes. Optional alias defaults to this caller's alias. Retain the handle in a var binding. Never print, stringify, clone or coerce the handle itself; print {name:worker.name,alias:worker.alias} for metadata. Agents have private REPLs, share local files, and cannot spawn children. Every new call admits separate work, even with the same name, prompt and alias. Names are nonunique display labels of 1..64 ASCII letters, digits, underscores or hyphens, without spaces. Do not call spawn to recover earlier work; retained results survive restart but opaque handles and child runtimes do not.".into(),
-                parameters: json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"},"prompt":{"type":"string","minLength":1},"alias":{"type":"string"}},"required":["name","prompt"],"additionalProperties":false}),
+                description: "Call var worker = await cocoa.spawn({name:'worker',prompt:'Complete task instructions'}), with optional model, thinking_level and alias in that same object. Returns an opaque handle after acceptance, before setup or execution finishes. Without overrides the child uses the caller's current model and thinking level. model selects a model ID; thinking_level is one of none, minimal, low, medium, high, xhigh or max. An optional alias selects a configured profile before model and thinking_level overrides. Retain the handle in a var binding. Never print, stringify, clone or coerce the handle itself; print {name:worker.name,alias:worker.alias} for metadata. Agents have private REPLs, share local files, and cannot spawn children. Every new call admits separate work, even with the same name, prompt and alias. Names are nonunique display labels of 1..64 ASCII letters, digits, underscores or hyphens, without spaces. Do not call spawn to recover earlier work; retained results survive restart but opaque handles and child runtimes do not.".into(),
+                parameters: json!({"type":"object","properties":{"name":{"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"},"prompt":{"type":"string","minLength":1},"alias":{"type":"string"},"model":{"type":"string","minLength":1},"thinking_level":{"type":"string","enum":["none","minimal","low","medium","high","xhigh","max"]}},"required":["name","prompt"],"additionalProperties":false}),
             },
             CapabilityDescription {
                 name: "cocoa.wait".into(),
@@ -1218,23 +1250,31 @@ impl ManagedCapabilities {
             name: String,
             prompt: String,
             alias: Option<String>,
+            model: Option<String>,
+            thinking_level: Option<ThinkingLevel>,
         }
-        if arguments
-            .get("alias")
-            .is_some_and(|alias| !alias.is_string())
-        {
-            return Err(tool("invalid_arguments", "alias must be a configured name"));
+        for field in ["alias", "model", "thinking_level"] {
+            if arguments.get(field).is_some_and(|value| !value.is_string()) {
+                return Err(tool(
+                    "invalid_arguments",
+                    "model selection fields must be strings",
+                ));
+            }
         }
         let original_arguments = arguments.clone();
         let arguments: Arguments = serde_json::from_value(arguments).map_err(|_| {
             tool(
                 "invalid_arguments",
-                "expected name, prompt and optional alias",
+                "expected name, prompt and optional alias, model and thinking_level",
             )
         })?;
         if !valid_name(&arguments.name)
             || arguments.prompt.trim().is_empty()
             || arguments.prompt.len() > self.manager.shared.child.input_bytes
+            || arguments
+                .model
+                .as_ref()
+                .is_some_and(|model| model.trim().is_empty())
         {
             return Err(tool("invalid_arguments", "invalid agent name or prompt"));
         }
@@ -1257,10 +1297,19 @@ impl ManagedCapabilities {
         let mut registry = self.manager.shared.registry.lock().await;
         registry.check()?;
         check_caller(limits, &cancellation)?;
-        let alias = arguments.alias.unwrap_or_else(|| self.alias.clone());
-        if !self.manager.shared.factory.supports_alias(&alias) {
-            return Err(tool("alias_unavailable", "alias is not configured"));
-        }
+        let selection = AgentSelection {
+            alias: arguments.alias,
+            model: arguments.model,
+            thinking_level: arguments.thinking_level,
+        };
+        self.manager
+            .shared
+            .factory
+            .validate_selection(&self.alias, &selection)?;
+        let alias = selection
+            .alias
+            .clone()
+            .unwrap_or_else(|| self.alias.clone());
         if let Some(start) = operation_record
             && let Some((id, accepted_arguments)) = registry.admissions.get(&start)
             && let Some(entry) = registry.entries.get(id)
@@ -1377,6 +1426,7 @@ impl ManagedCapabilities {
             name: arguments.name.clone(),
             prompt: arguments.prompt,
             alias,
+            selection,
             reference,
             creator: self.creator.clone(),
             cancellation: CancellationToken::new(),
@@ -1660,14 +1710,14 @@ impl AgentManager {
         cancellation: CancellationToken,
         events: EventPublisher,
     ) -> Result<(), CapabilityError> {
-        let (name, alias) = {
+        let (name, selection) = {
             let registry = self.shared.registry.lock().await;
             let entry = registry.entries.get(&id).ok_or_else(unsettled)?;
-            (entry.name.clone(), entry.alias.clone())
+            (entry.name.clone(), entry.selection.clone())
         };
         let name = name.as_str();
         let created = self
-            .create_engine(id, name, &alias, limits, cancellation.clone(), events)
+            .create_engine(id, name, &selection, limits, cancellation.clone(), events)
             .await;
         let mut engine = match created {
             Ok(engine) => engine,
@@ -1832,7 +1882,7 @@ impl AgentManager {
         &self,
         id: AgentId,
         name: &str,
-        alias: &str,
+        selection: &AgentSelection,
         limits: Limits,
         cancellation: CancellationToken,
         events: EventPublisher,
@@ -1847,7 +1897,7 @@ impl AgentManager {
                 shared: Arc::downgrade(&self.shared),
                 events: Some(events),
             },
-            alias,
+            selection,
             limits,
             cancellation.clone(),
         );

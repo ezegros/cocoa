@@ -285,7 +285,7 @@ impl AgentFactory for Capture {
     async fn create(
         &self,
         participant: AgentParticipant,
-        _alias: &str,
+        _selection: &cocoa::agents::AgentSelection,
         limits: Limits,
         _cancellation: CancellationToken,
     ) -> Result<Engine, CapabilityError> {
