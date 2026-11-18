@@ -573,6 +573,66 @@ async fn selected_search_uses_native_mcp_tools_and_never_falls_back_when_unavail
 }
 
 #[tokio::test]
+async fn activity_labels_identify_servers_tools_and_discovery() -> Result<(), Box<dyn Error>> {
+    let remote = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(|request: &Request| {
+            let Ok(body) = request.body_json::<Value>() else {
+                return ResponseTemplate::new(400);
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc":"2.0", "id":body["id"],
+                "result":{"tools":[{"name":"find:pages","inputSchema":{"type":"object"}}]}
+            }))
+        })
+        .mount(&remote)
+        .await;
+    let directory = tempfile::tempdir()?;
+    let manager = McpManager::new(directory.path().join("credentials"))?;
+    manager.configure(BTreeMap::from([
+        (
+            "design-docs".into(),
+            Server::new(&format!("{}/mcp", remote.uri()), None)?,
+        ),
+        (
+            "work-docs".into(),
+            Server::new(&format!("{}/mcp", remote.uri()), None)?,
+        ),
+    ]))?;
+    manager.connect_all().await?;
+    let host = manager.bind(Arc::new(Empty));
+    let bindings = host.bindings();
+    assert_eq!(bindings.len(), 2);
+    for binding in &bindings {
+        let input = host.describe_input(&binding.name, &json!({"query":"private search"}));
+        assert_eq!(input.title, format!("{} · find:pages", binding.path[1]));
+        assert_eq!(input.text, r#"{"query":"private search"}"#);
+    }
+    assert_eq!(
+        host.describe_input("cocoa.mcp_tools", &json!({})).title,
+        "Tools"
+    );
+    let discovery = host.describe_input(
+        "cocoa.mcp_tools",
+        &json!({"server":"work-docs","query":"private filter"}),
+    );
+    assert_eq!(discovery.title, "Tools · work-docs");
+    assert_eq!(
+        serde_json::from_str::<Value>(&discovery.text)?,
+        json!({"server":"work-docs","query":"private filter"})
+    );
+    manager.configure(BTreeMap::new())?;
+    for binding in &bindings {
+        assert_eq!(
+            host.describe_input(&binding.name, &json!({})).title,
+            "find:pages"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn generated_functions_preserve_names_results_and_variables_but_not_revoked_grants()
 -> Result<(), Box<dyn Error>> {
     let remote = MockServer::start().await;

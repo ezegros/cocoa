@@ -1053,8 +1053,35 @@ impl CapabilityHost for McpCapabilities {
                 .describe_input(name, arguments);
         }
         if name == "cocoa.mcp_tools" || name.starts_with("mcp:") {
+            let title = if name == "cocoa.mcp_tools" {
+                match arguments.get("server").and_then(Value::as_str) {
+                    Some(server) => format!("Tools · {server}"),
+                    None => "Tools".into(),
+                }
+            } else if let Some((identity, tool)) = name
+                .strip_prefix("mcp:")
+                .and_then(|name| name.split_once(':'))
+            {
+                let identity = identity.parse::<u64>().ok();
+                let server = match self.manager.shared.entries.read() {
+                    Ok(entries) => entries
+                        .iter()
+                        .find(|(_, entry)| Some(entry.identity) == identity)
+                        .map(|(name, _)| name.clone()),
+                    Err(error) => {
+                        tracing::error!(%error, "MCP activity server lookup unavailable");
+                        None
+                    }
+                };
+                match server {
+                    Some(server) => format!("{server} · {tool}"),
+                    None => tool.into(),
+                }
+            } else {
+                "Tool call".into()
+            };
             CapabilityInput {
-                title: "MCP".into(),
+                title,
                 text: arguments.to_string(),
                 summary: None,
             }
