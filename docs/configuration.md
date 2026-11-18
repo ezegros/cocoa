@@ -99,7 +99,7 @@ Saved credentials are plaintext. Cocoa requires owner-only permissions, `0600` f
 | `default_alias` | Unset | Configured alias to select at startup unless overridden |
 | `theme` | `dark-chocolate` | `dark-chocolate`, `cacao-grove`, `milk-chocolate` or `terminal-native` |
 | `reduced_motion` | `false` | Static busy indicator |
-| `auto_update` | `true` | Check and install stable updates in the background at interactive startup; honors version pins |
+| `auto_update` | `true` | Check and install updates on the saved installation channel at interactive startup; honors version pins |
 | `message_steering` | `true` | Queue messages while the agent works |
 | `web_search` | `{"provider":"exa"}` | Built-in Exa, disabled, or an MCP server; see [search](customization.md#web-search) |
 | `mcp_servers` | `{}` | HTTP server configuration managed by `cocoa mcp`; see [MCP](customization.md#mcp-servers) |
@@ -114,7 +114,7 @@ Saved credentials are plaintext. Cocoa requires owner-only permissions, `0600` f
 
 `--theme` and `--reduced-motion` override presentation for one launch without saving it. `/theme` changes the current view only. Most execution settings apply when creating a session; changing them can prevent resume of an existing session.
 
-`COCOA_AUTO_UPDATE=0` disables automatic updates for one process. Manual `cocoa update` and `/update` still work when automatic updates are disabled. Version pins belong to the installation and are managed with `update --version VERSION` and `update --unpin`, not project settings. See [updates and rollback](installation.md#update-roll-back-or-uninstall).
+`COCOA_AUTO_UPDATE=0` disables automatic updates for one process. Manual `cocoa update` and `/update` still work when automatic updates are disabled. Channels and version pins belong to the installation receipt, not project settings. Use `cocoa update --channel stable` or `cocoa update --channel preview`, or the same options with `/update`, to save a channel. Stable is the default for new installations and older receipts. Preview accepts stable releases and exact `X.Y.Z-preview.N` releases. A pin set with `update --version VERSION` takes precedence over the channel; selecting a channel does not clear it. `update --unpin` resumes the saved channel. Channel updates never automatically downgrade; an explicit `--version` can. See [updates and rollback](installation.md#update-roll-back-or-uninstall).
 
 ## Compaction
 

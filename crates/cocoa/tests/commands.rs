@@ -28,6 +28,8 @@ fn update_is_noninteractive_and_independent_of_provider_configuration() -> Resul
         vec!["update", "--check"],
         vec!["update", "--version", "v0.2.3-preview.1"],
         vec!["update", "--unpin"],
+        vec!["update", "--channel", "stable"],
+        vec!["update", "--channel", "preview"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_cocoa"))
             .env_clear()
@@ -45,6 +47,10 @@ fn update_is_noninteractive_and_independent_of_provider_configuration() -> Resul
         vec!["update", "--check", "--unpin"],
         vec!["update", "--check", "--version", "0.2.3"],
         vec!["update", "--version", "0.2.3", "--unpin"],
+        vec!["update", "--channel", "preview", "--version", "0.2.3"],
+        vec!["update", "--channel", "stable", "--unpin"],
+        vec!["update", "--channel", "preview", "--check"],
+        vec!["update", "--channel", "nightly"],
         vec!["update", "--version", "latest"],
         vec!["update", "--version", "../0.2.3"],
     ] {

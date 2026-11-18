@@ -20,9 +20,9 @@ Open a new terminal, run `cocoa --version`, then run `cocoa` from your project d
 
 Cocoa provides builds for macOS on Apple Silicon and Intel, and Linux on ARM64 and x86-64. Windows and 32-bit systems are unsupported. A macOS shell running under Rosetta selects the Intel build.
 
-Install `curl`, `tar`, `gzip`, standard Unix utilities and either `sha256sum` or `shasum`. Cocoa needs `/bin/bash` to execute shell commands. Minimal Linux images may require these packages. Chat requires an interactive terminal.
+Install `curl`, `tar`, `gzip`, standard Unix utilities and either `sha256sum` or `shasum`. Preview discovery and preserving an existing installation channel also require `jq`. Fresh stable installations do not require `jq`. Cocoa needs `/bin/bash` to execute shell commands. Minimal Linux images may require these packages. Chat requires an interactive terminal.
 
-## Choose a version or directory
+## Choose a channel, version or directory
 
 Set `VERSION` to a published release tag, including a preview tag if desired:
 
@@ -31,7 +31,18 @@ VERSION=v0.1.0
 curl -fsSL "https://github.com/ezegros/cocoa/releases/download/$VERSION/install.sh" | bash -s -- --version "$VERSION"
 ```
 
-Versions accept an optional `v` prefix. Without `--version`, the installer selects the latest stable release, never a preview. A versioned script URL alone does not pin the executable; pass `--version` too.
+Versions accept an optional `v` prefix. Without `--version`, the installer follows the saved installation channel, or stable for a new installation. A versioned script URL alone does not pin the executable; pass `--version` too.
+
+Choose a channel with a current installer:
+
+```sh
+bash install.sh --channel preview
+bash install.sh --channel stable
+```
+
+`--channel` accepts only `stable` or `preview` and cannot be combined with `--version`. Stable excludes prereleases. Preview considers stable releases and exact `X.Y.Z-preview.N` tags, choosing the highest semantic version rather than the most recently published release. Drafts and other prereleases are excluded. Discovery reads up to ten pages of 100 GitHub releases, with a 1 MiB limit per page, and fails if the last page is still full. Use an exact `--version` if discovery reaches this limit.
+
+Older stable release installers may not recognize `--channel`. Until a stable release includes channel support, download `install.sh` from a published preview release that includes it, inspect it, then run it with `--channel preview`. A versioned script URL chooses the installer script, not the executable version.
 
 Choose a different absolute installation directory:
 
@@ -55,22 +66,26 @@ Only run the file after a successful download. The installer checks the archive 
 
 ## Update, roll back or uninstall
 
-Installer-managed installations automatically check for stable updates in the background when interactive chat or resume starts, at most once per hour per installation. An available update installs without interrupting the current session and takes effect on the next launch. There are no periodic checks during a session. Help, version, `exec` and administrative commands do not start automatic updates.
+Installer-managed installations automatically check for updates on their saved channel in the background when interactive chat or resume starts, at most once per hour per installation. An available update installs without interrupting the current session and takes effect on the next launch. There are no periodic checks during a session. Help, version, `exec` and administrative commands do not start automatic updates.
 
 Run `cocoa update` or `/update` to update manually. Both honor a saved version pin rather than silently returning to latest. The options are the same in the CLI and chat:
 
 | Command | Behavior |
 | --- | --- |
-| `cocoa update` | Install a newer stable release, or keep the pinned version |
-| `cocoa update --check` | Report installed and latest stable versions, and any pin, without installing or changing policy |
+| `cocoa update` | Install a newer release on the saved channel, or keep the pinned version |
+| `cocoa update --check` | Report installed and available versions, channel and any pin, without installing or changing policy |
+| `cocoa update --channel preview` | Save the preview channel and install a newer eligible release, unless pinned |
+| `cocoa update --channel stable` | Save the stable channel without downgrading or clearing a pin |
 | `cocoa update --version 0.2.3` | Install that exact release and keep it pinned, even if it is older |
-| `cocoa update --unpin` | Resume stable updates and install a newer stable release if available |
+| `cocoa update --unpin` | Clear the pin and install a newer release on the saved channel if available |
 
-Manual operations bypass the one-hour check interval. Ordinary updates and unpinning never downgrade a newer installed version. Exact versions accept a `v` prefix and preview tags. Passing `--version` to the installer also creates a persistent pin. Reusing the installer without `--version` selects latest stable and clears the pin.
+Manual operations bypass the one-hour check interval. Ordinary updates and unpinning never downgrade a newer installed version. Exact versions accept a `v` prefix and preview tags. Passing `--version` to the installer also creates a persistent pin. Reusing the installer without `--version` follows the saved channel and clears the pin. Unlike ordinary self-updates, rerunning the installer can install an older release.
+
+Pins take precedence over channel selection. For example, `/update --channel preview` saves preview but keeps an existing pin; `/update --unpin` then follows preview. Both the CLI and `/update` accept `--channel stable|preview`. Changing channels does not automatically downgrade a preview installation to an older stable release. Use `--version` for an intentional rollback.
 
 Set `"auto_update": false` in `~/.config/cocoa/config.json` to disable automatic checks and installations. `COCOA_AUTO_UPDATE=0` disables them for one process. Neither prevents manual updates.
 
-Self-updates require the ownership receipt written by the installer. Existing installations from older installers must rerun the current installer once. Cargo installations and copied binaries do not update themselves; use their original installation method or reinstall with the installer. The receipt records the repository, platform, installed binary hash and pin beside the executable, not in project configuration.
+Self-updates require the ownership receipt written by the installer. Existing installations from older installers must rerun the current installer once. Cargo installations and copied binaries do not update themselves; use their original installation method or reinstall with the installer. The schema-1 receipt records the repository, platform, installed binary hash, channel and pin beside the executable, not in project configuration. Older receipts without a channel mean stable. If the installer cannot safely read the saved channel, it fails rather than silently resetting it; pass `--channel` explicitly to choose a replacement policy.
 
 Downloads use HTTPS and release checksums. Cocoa stages the replacement beside the executable and uses an atomic rename, so existing processes continue running their original binary. A shared installation lock prevents concurrent installer/updater writes. If an interrupted operation leaves `.cocoa-update.lock`, confirm that no installer or updater is still running before removing that directory. The next update reconciles any pending receipt against the installed binary.
 

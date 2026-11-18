@@ -20,22 +20,47 @@ const PENDING: &str = ".cocoa-update-pending.json";
 const LOCK: &str = ".cocoa-update.lock";
 const ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 const MANIFEST_BYTES: u64 = 64 * 1024;
+const RELEASE_PAGES_MAX: usize = 10;
+const RELEASE_PAGE_ENTRIES_MAX: usize = 100;
+const RELEASE_PAGE_BYTES_MAX: u64 = 1024 * 1024;
 const RECEIPT_BYTES: u64 = 4096;
 const CHECK_INTERVAL: u64 = 3600;
+
+/// Release stream tracked by an installer-managed executable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    #[default]
+    Stable,
+    /// Stable releases and numbered preview releases, ordered by semantic version.
+    Preview,
+}
+
+impl fmt::Display for Channel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Stable => "stable",
+            Self::Preview => "preview",
+        })
+    }
+}
 
 /// Options shared by `cocoa update` and `/update`. Actions are mutually exclusive.
 #[derive(clap::Args)]
 #[group(multiple = false)]
 pub struct Arguments {
-    /// Report the latest stable release without installing or changing a pin.
+    /// Report the selected channel's latest release without changing installation policy.
     #[arg(long)]
     check: bool,
     /// Install and persistently pin an exact version, including older releases.
     #[arg(long, value_name = "VERSION", value_parser = parse_version)]
     version: Option<Version>,
-    /// Clear the version pin and resume stable updates without downgrading.
+    /// Clear the version pin and resume the selected channel without downgrading.
     #[arg(long)]
     unpin: bool,
+    /// Persist a release channel and check for updates, respecting version pins.
+    #[arg(long, value_enum)]
+    channel: Option<Channel>,
 }
 
 /// Update policy for this operation. Explicit versions are persistent pins.
@@ -45,6 +70,7 @@ pub enum Request {
     Check,
     Version(Version),
     Unpin,
+    Channel(Channel),
     /// Respect pins and the installation's shared one-hour check interval.
     Automatic,
 }
@@ -53,6 +79,8 @@ impl From<Arguments> for Request {
     fn from(arguments: Arguments) -> Self {
         if let Some(version) = arguments.version {
             Self::Version(version)
+        } else if let Some(channel) = arguments.channel {
+            Self::Channel(channel)
         } else if arguments.check {
             Self::Check
         } else if arguments.unpin {
@@ -67,16 +95,24 @@ impl From<Arguments> for Request {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Outcome {
     Skipped,
-    Pinned(Version),
-    Current(Version),
+    Pinned {
+        version: Version,
+        channel: Channel,
+    },
+    Current {
+        version: Version,
+        channel: Channel,
+    },
     Checked {
         installed: Version,
         latest: Version,
         pinned: Option<Version>,
+        channel: Channel,
     },
     Installed {
         version: Version,
         pinned: bool,
+        channel: Channel,
     },
 }
 
@@ -84,35 +120,38 @@ impl fmt::Display for Outcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Skipped => Ok(()),
-            Self::Pinned(version) => write!(
+            Self::Pinned { version, channel } => write!(
                 formatter,
-                "Cocoa is pinned to {version}. Use --unpin to resume stable updates."
+                "Cocoa is pinned to {version}. Use --unpin to resume {channel} updates."
             ),
-            Self::Current(version) => write!(
+            Self::Current { version, channel } => write!(
                 formatter,
-                "Installed Cocoa {version}; no newer stable release. Tracking stable updates."
+                "Installed Cocoa {version}; no newer eligible release. Tracking {channel} updates."
             ),
             Self::Checked {
                 installed,
                 latest,
                 pinned,
+                channel,
             } => {
                 write!(
                     formatter,
-                    "Installed Cocoa {installed}; latest stable {latest}."
+                    "Installed Cocoa {installed}; latest {channel} {latest}."
                 )?;
                 if let Some(version) = pinned {
                     write!(formatter, " Pinned to {version}.")?;
                 }
                 Ok(())
             }
-            Self::Installed { version, pinned } => {
-                write!(
-                    formatter,
-                    "Installed Cocoa {version}{}. Start Cocoa again to use it; this session is unchanged.",
-                    if *pinned { " and pinned it" } else { "" }
-                )
-            }
+            Self::Installed {
+                version,
+                pinned,
+                channel,
+            } => write!(
+                formatter,
+                "Installed Cocoa {version}{}. Tracking {channel} updates. Start Cocoa again to use it; this session is unchanged.",
+                if *pinned { " and pinned it" } else { "" }
+            ),
         }
     }
 }
@@ -219,17 +258,29 @@ impl Updater {
         {
             return Ok(Outcome::Skipped);
         }
-        if matches!(request, Request::Latest)
+        let channel = match request {
+            Request::Channel(channel) => channel,
+            _ => installation.receipt.channel,
+        };
+        if matches!(request, Request::Latest | Request::Channel(_))
             && let Some(version) = &installation.receipt.pinned_version
         {
-            return Ok(Outcome::Pinned(version.clone()));
+            let version = version.clone();
+            if matches!(request, Request::Channel(_)) {
+                installation.receipt.channel = channel;
+                installation.save()?;
+            }
+            return Ok(Outcome::Pinned { version, channel });
         }
         if let Request::Version(version) = &request {
             parse_version(&version.to_string()).map_err(Error::Metadata)?;
             if version == &installation.receipt.version {
                 installation.receipt.pinned_version = Some(version.clone());
                 installation.save()?;
-                return Ok(Outcome::Pinned(version.clone()));
+                return Ok(Outcome::Pinned {
+                    version: version.clone(),
+                    channel,
+                });
             }
         }
         installation.receipt.checked_at = now;
@@ -247,13 +298,19 @@ impl Updater {
             .join(&format!("{}/releases/", installation.receipt.repository))?;
         let version = match &request {
             Request::Version(version) => version.clone(),
-            _ => latest(&client, &releases).await?,
+            _ => match channel {
+                Channel::Stable => latest(&client, &releases).await?,
+                Channel::Preview => {
+                    latest_preview(&client, &self.host, &installation.receipt.repository).await?
+                }
+            },
         };
         if matches!(request, Request::Check) {
             return Ok(Outcome::Checked {
                 installed: installation.receipt.version.clone(),
                 latest: version,
                 pinned: installation.receipt.pinned_version.clone(),
+                channel,
             });
         }
         if !matches!(request, Request::Version(_))
@@ -263,9 +320,13 @@ impl Updater {
         {
             if matches!(request, Request::Unpin) {
                 installation.receipt.pinned_version = None;
-                installation.save()?;
             }
-            return Ok(Outcome::Current(installation.receipt.version.clone()));
+            installation.receipt.channel = channel;
+            installation.save()?;
+            return Ok(Outcome::Current {
+                version: installation.receipt.version.clone(),
+                channel,
+            });
         }
         progress("Downloading and verifying Cocoa...");
         let assets = releases.join(&format!("download/v{version}/"))?;
@@ -306,8 +367,13 @@ impl Updater {
             installation.receipt.version = version.clone();
             let pinned = matches!(request, Request::Version(_));
             installation.receipt.pinned_version = pinned.then(|| version.clone());
+            installation.receipt.channel = channel;
             installation.publish(&binary, &previous_digest)?;
-            Ok(Outcome::Installed { version, pinned })
+            Ok(Outcome::Installed {
+                version,
+                pinned,
+                channel,
+            })
         })
         .await?
     }
@@ -322,6 +388,8 @@ struct Receipt {
     version: Version,
     sha256: String,
     pinned_version: Option<Version>,
+    #[serde(default)]
+    channel: Channel,
     checked_at: u64,
 }
 
@@ -506,12 +574,71 @@ async fn latest(client: &reqwest::Client, releases: &Url) -> Result<Version, Err
     Ok(version)
 }
 
+#[derive(Deserialize)]
+struct Release {
+    tag_name: String,
+    draft: bool,
+}
+
+async fn latest_preview(
+    client: &reqwest::Client,
+    host: &Url,
+    repository: &str,
+) -> Result<Version, Error> {
+    let api = if host.host_str() == Some("github.com") {
+        Url::parse("https://api.github.com/")?
+    } else {
+        host.clone()
+    };
+    let mut latest: Option<Version> = None;
+    for page in 1..=RELEASE_PAGES_MAX {
+        let url = api.join(&format!(
+            "repos/{repository}/releases?per_page={RELEASE_PAGE_ENTRIES_MAX}&page={page}"
+        ))?;
+        let bytes = download_bytes(client, url, RELEASE_PAGE_BYTES_MAX).await?;
+        let releases: Vec<Release> = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::Metadata("invalid GitHub releases response"))?;
+        if releases.len() > RELEASE_PAGE_ENTRIES_MAX {
+            return Err(Error::Metadata("release page exceeds entry limit"));
+        }
+        for release in &releases {
+            if release.draft {
+                continue;
+            }
+            let Ok(version) = parse_version(&release.tag_name) else {
+                continue;
+            };
+            if !version.build.is_empty() {
+                continue;
+            }
+            if !version.pre.is_empty() {
+                let Some(number) = version.pre.as_str().strip_prefix("preview.") else {
+                    continue;
+                };
+                if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+                    continue;
+                }
+            }
+            if latest
+                .as_ref()
+                .is_none_or(|current| version.cmp_precedence(current).is_gt())
+            {
+                latest = Some(version);
+            }
+        }
+        if releases.len() < RELEASE_PAGE_ENTRIES_MAX {
+            return latest.ok_or(Error::Metadata("no eligible preview or stable release"));
+        }
+    }
+    Err(Error::Metadata("release discovery exceeds page limit"))
+}
+
 async fn download_bytes(client: &reqwest::Client, url: Url, limit: u64) -> Result<Vec<u8>, Error> {
     let mut response = client.get(url).send().await?.error_for_status()?;
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         if bytes.len() as u64 + chunk.len() as u64 > limit {
-            return Err(Error::Metadata("checksum manifest exceeds 64 KiB"));
+            return Err(Error::Metadata("download exceeds configured byte limit"));
         }
         bytes.extend_from_slice(&chunk);
     }

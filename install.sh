@@ -7,13 +7,16 @@ COCOA_REPOSITORY=${COCOA_REPOSITORY:-ezegros/cocoa}
 main() {
     version=latest
     explicit_version=0
+    channel=stable
+    explicit_channel=0
     install_directory=${COCOA_INSTALL_DIR-}
     while [ "$#" -gt 0 ]; do
         case "$1" in
-            --version|--install-dir)
+            --version|--channel|--install-dir)
                 [ "$#" -ge 2 ] && [ -n "$2" ] || fail "Missing value for $1"
                 case "$1" in
                     --version) version=$2; explicit_version=1 ;;
+                    --channel) channel=$2; explicit_channel=1 ;;
                     --install-dir) install_directory=$2 ;;
                 esac
                 shift 2
@@ -22,9 +25,10 @@ main() {
                 printf '%s\n' \
                     'Install Cocoa from GitHub Releases.' \
                     '' \
-                    'Usage: bash install.sh [--version VERSION] [--install-dir DIRECTORY]' \
+                    'Usage: bash install.sh [--version VERSION | --channel stable|preview] [--install-dir DIRECTORY]' \
                     '' \
                     '  --version VERSION        Pin a release version, with or without v; default: latest stable' \
+                    '  --channel CHANNEL        Track stable or preview; default: saved channel or stable' \
                     '  --install-dir DIRECTORY  Absolute binary directory; default: ~/.local/bin' \
                     '  COCOA_INSTALL_DIR        Set the default binary directory' \
                     "  COCOA_REPOSITORY         GitHub owner/repo; default: $COCOA_REPOSITORY" \
@@ -35,6 +39,9 @@ main() {
             *) fail "Unknown option: $1. Use --help for usage." ;;
         esac
     done
+
+    case "$channel" in stable|preview) ;; *) fail "Invalid channel: $channel. Use stable or preview." ;; esac
+    [ "$explicit_version" -eq 0 ] || [ "$explicit_channel" -eq 0 ] || fail '--version and --channel cannot be combined.'
 
     if [ -z "$install_directory" ]; then
         [ -n "${HOME-}" ] || fail 'HOME is unset; pass --install-dir with an absolute path.'
@@ -105,8 +112,23 @@ main() {
     trap 'exit 143' TERM
     [ "$signal_status" -eq 0 ] || exit "$signal_status"
 
+    if [ "$explicit_channel" -eq 0 ] && [ -f "$receipt" ]; then
+        command -v jq > /dev/null 2>&1 || fail 'Preserving an existing receipt channel requires jq. Install jq or pass --channel stable or --channel preview.'
+        command -v wc > /dev/null 2>&1 || fail 'Reading an existing receipt requires wc.'
+        receipt_size=$(wc -c < "$receipt")
+        [ "$receipt_size" -le 4096 ] || fail 'The existing receipt exceeds 4096 bytes; pass --channel explicitly.'
+        channel=$(jq -ser --arg repository "$COCOA_REPOSITORY" --arg target "$target" '
+            if length != 1 then error("expected one receipt") else .[0] end |
+            if type == "object" and .schema == 1 and .repository == $repository and .target == $target
+                and ((has("channel") | not) or .channel == "stable" or .channel == "preview")
+            then .channel // "stable" else error("invalid installation receipt") end
+        ' "$receipt") || fail 'Cannot preserve the existing receipt channel; pass --channel explicitly.'
+    fi
+
     release_root=https://github.com/$COCOA_REPOSITORY/releases
-    if [ "$version" = latest ]; then
+    if [ "$version" = latest ] && [ "$channel" = preview ]; then
+        discover_preview
+    elif [ "$version" = latest ]; then
         if ! release_url=$(download --max-filesize 1048576 --output /dev/null --write-out '%{url_effective}' "$release_root/latest"); then
             fail 'Could not resolve the latest stable release. A draft or prerelease is not available through latest; publish a release or pass --version.'
         fi
@@ -169,8 +191,8 @@ main() {
         shasum) binary_checksum=$(shasum -a 256 < "$temporary_directory/cocoa") ;;
     esac
     binary_checksum=${binary_checksum%% *}
-    new_receipt=$(printf '{"schema":1,"repository":"%s","target":"%s","version":"%s","sha256":"%s","pinned_version":%s,"checked_at":0}' \
-        "$COCOA_REPOSITORY" "$target" "$normalized_version" "$binary_checksum" "$pinned_version")
+    new_receipt=$(printf '{"schema":1,"repository":"%s","target":"%s","version":"%s","sha256":"%s","pinned_version":%s,"channel":"%s","checked_at":0}' \
+        "$COCOA_REPOSITORY" "$target" "$normalized_version" "$binary_checksum" "$pinned_version" "$channel")
     [ "${#new_receipt}" -lt 4096 ] || fail 'The installation receipt exceeds the 4096-byte limit.'
     printf '%s\n' "$new_receipt" > "$temporary_directory/receipt.json"
     validate_installation_paths
@@ -186,6 +208,37 @@ main() {
             printf 'To keep it for future terminals, add that line to your shell profile. Then run cocoa.\n'
             ;;
     esac
+}
+
+discover_preview() {
+    command -v jq > /dev/null 2>&1 || fail 'Preview discovery requires jq. Install jq or use --version with an exact release tag.'
+    page=1
+    while [ "$page" -le 10 ]; do
+        page_file=$temporary_directory/releases.json
+        download --max-filesize 1048576 --output "$page_file" \
+            "https://api.github.com/repos/$COCOA_REPOSITORY/releases?per_page=100&page=$page" \
+            || fail 'Could not discover preview releases through the GitHub API.'
+        count=$(jq -er '
+            if type == "array" and length <= 100 and all(.[];
+                type == "object" and (.draft | type) == "boolean" and (.tag_name | type) == "string")
+            then length else error("invalid release page") end
+        ' "$page_file") || fail 'Invalid GitHub releases response.'
+        # Compare numeric identifiers as strings to avoid jq's floating-point precision loss.
+        jq -r '
+            [.[] | select(.draft == false) | .tag_name
+                | select(test("^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-preview\\.(0|[1-9][0-9]*))?$"))
+                | . as $tag | ltrimstr("v") | split("-preview.")
+                | {tag: $tag, core: (.[0] | split(".")), preview: .[1]}
+                | select(all(.core[]; length < 20 or (length == 20 and . <= "18446744073709551615")))
+                | .key = ([.core[] | [length, .]] +
+                    [if .preview == null then [1] else [0, (.preview | length), .preview] end])]
+        ' "$page_file" >> "$temporary_directory/candidates.json" || fail 'Could not parse release versions.'
+        [ "$count" -eq 100 ] || break
+        [ "$page" -lt 10 ] || fail 'Preview discovery exceeded 1000 releases; use --version with an exact tag.'
+        page=$((page + 1))
+    done
+    version=$(jq -ser 'add | sort_by(.key) | last | .tag // error("no matching releases")' \
+        "$temporary_directory/candidates.json") || fail 'No published stable or preview release was found.'
 }
 
 validate_version() {

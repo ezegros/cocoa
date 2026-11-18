@@ -18,6 +18,130 @@ const INSTALLER: &[u8] = include_bytes!("../../../install.sh");
 const LINUX_TARGET: &str = "x86_64-unknown-linux-musl";
 
 #[test]
+fn preview_channel_orders_versions_and_preserves_policy() -> Result<(), Box<dyn Error>> {
+    for shell in ["/bin/sh", "/bin/bash"] {
+        let fixture = Fixture::new("Linux", "x86_64")?;
+        fixture.release("v0.2.0-preview.10", LINUX_TARGET)?;
+        let releases = serde_json::json!([
+            {"tag_name": "v0.2.0-preview.2", "draft": false},
+            {"tag_name": "v0.1.9", "draft": false},
+            {"tag_name": "v0.2.0-preview.10", "draft": false},
+            {"tag_name": "v9.0.0", "draft": true},
+            {"tag_name": "v9.0.0-beta.1", "draft": false},
+            {"tag_name": "v9.0.0-preview.01", "draft": false},
+            {"tag_name": "v9.0.0-preview.1+build", "draft": false}
+        ]);
+        fs::write(fixture.assets.join("page-1.json"), releases.to_string())?;
+        let output = run_installer(fixture.command(shell).args(["--channel", "preview"]))?;
+        assert!(output.status.success(), "{output:?}");
+        let directory = fixture.home.join(".local/bin");
+        let receipt_path = directory.join(".cocoa-install.json");
+        let receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+        assert_eq!(receipt["schema"], 1);
+        assert_eq!(receipt["channel"], "preview");
+        assert_eq!(receipt["version"], "0.2.0-preview.10");
+        assert_eq!(receipt["pinned_version"], serde_json::Value::Null);
+
+        fixture.release("v0.2.0", LINUX_TARGET)?;
+        fs::write(
+            fixture.assets.join("page-1.json"),
+            r#"[{"tag_name":"v0.2.0-preview.10","draft":false},{"tag_name":"v0.2.0","draft":false}]"#,
+        )?;
+        let output = run_installer(&mut fixture.command(shell))?;
+        assert!(output.status.success(), "{output:?}");
+        let receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+        assert_eq!(receipt["channel"], "preview");
+        assert_eq!(receipt["version"], "0.2.0");
+        let output = run_installer(fixture.command(shell).args(["--version", "0.2.0"]))?;
+        assert!(output.status.success(), "{output:?}");
+        let receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+        assert_eq!(receipt["channel"], "preview");
+        assert_eq!(receipt["pinned_version"], "0.2.0");
+    }
+    Ok(())
+}
+
+#[test]
+fn preview_discovery_paginates_and_rejects_truncation() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("Linux", "x86_64")?;
+    fixture.release("v0.2.0-preview.1", LINUX_TARGET)?;
+    let full_page = vec![serde_json::json!({"tag_name":"v0.1.0", "draft":false}); 100];
+    fs::write(
+        fixture.assets.join("page-1.json"),
+        serde_json::to_vec(&full_page)?,
+    )?;
+    fs::write(
+        fixture.assets.join("page-2.json"),
+        r#"[{"tag_name":"v0.2.0-preview.1","draft":false}]"#,
+    )?;
+    let output = run_installer(fixture.command("/bin/sh").args(["--channel", "preview"]))?;
+    assert!(output.status.success(), "{output:?}");
+    let directory = fixture.home.join(".local/bin");
+    let previous = fs::read(directory.join(".cocoa-install.json"))?;
+    for page in 2..=10 {
+        fs::write(
+            fixture.assets.join(format!("page-{page}.json")),
+            serde_json::to_vec(&full_page)?,
+        )?;
+    }
+    let output = run_installer(fixture.command("/bin/sh").args(["--channel", "preview"]))?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("exceeded 1000 releases"));
+    assert_eq!(fs::read(directory.join(".cocoa-install.json"))?, previous);
+    for response in [
+        "not JSON",
+        "{}",
+        "[]",
+        r#"[{"tag_name":"v0.3.0","draft":"false"}]"#,
+    ] {
+        fs::write(fixture.assets.join("page-1.json"), response)?;
+        let output = run_installer(fixture.command("/bin/sh").args(["--channel", "preview"]))?;
+        assert!(!output.status.success(), "{response}: {output:?}");
+        assert_eq!(fs::read(directory.join(".cocoa-install.json"))?, previous);
+    }
+    Ok(())
+}
+
+#[test]
+fn channel_validation_and_safe_receipt_fallback() -> Result<(), Box<dyn Error>> {
+    let fixture = Fixture::new("Linux", "x86_64")?;
+    fixture.release("v0.1.0", LINUX_TARGET)?;
+    for arguments in [
+        vec!["--channel", "nightly"],
+        vec!["--channel"],
+        vec!["--version", "0.1.0", "--channel", "stable"],
+    ] {
+        let output = run_installer(fixture.command("/bin/sh").args(arguments))?;
+        assert!(!output.status.success());
+        assert!(!fixture.home.join(".local/bin/cocoa").exists());
+    }
+    let output = run_installer(&mut fixture.command("/bin/sh"))?;
+    assert!(output.status.success(), "{output:?}");
+    let directory = fixture.home.join(".local/bin");
+    let receipt_path = directory.join(".cocoa-install.json");
+    let mut receipt: serde_json::Value = serde_json::from_slice(&fs::read(&receipt_path)?)?;
+    receipt
+        .as_object_mut()
+        .ok_or("receipt must be an object")?
+        .remove("channel");
+    fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
+    let output = run_installer(&mut fixture.command("/bin/sh"))?;
+    assert!(output.status.success(), "{output:?}");
+    assert_receipt(&directory, LINUX_TARGET, "0.1.0", None)?;
+
+    fs::remove_file(fixture.tools.join("jq"))?;
+    let output = run_installer(&mut fixture.command("/bin/sh"))?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("requires jq"));
+    let output = run_installer(fixture.command("/bin/sh").args(["--channel", "stable"]))?;
+    assert!(output.status.success(), "{output:?}");
+    let output = run_installer(fixture.command("/bin/sh").args(["--channel", "preview"]))?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8(output.stderr)?.contains("requires jq"));
+    Ok(())
+}
+
+#[test]
 fn installs_each_platform_and_replaces_only_the_executable() -> Result<(), Box<dyn Error>> {
     for (system, architecture, target, shell) in [
         ("Darwin", "arm64", "aarch64-apple-darwin", "/bin/bash"),
@@ -163,7 +287,14 @@ fn failed_downloads_and_checksums_preserve_the_installed_version() -> Result<(),
         let executable = directory.join("cocoa");
         write_executable(&executable, "previous executable")?;
         let receipt = directory.join(".cocoa-install.json");
-        fs::write(&receipt, "previous receipt")?;
+        let previous_receipt = serde_json::json!({
+            "schema": 1,
+            "repository": "ezegros/cocoa",
+            "target": LINUX_TARGET,
+            "channel": "stable"
+        })
+        .to_string();
+        fs::write(&receipt, &previous_receipt)?;
         let output = run_installer(fixture.command("/bin/sh").args(["--version", "v0.1.0"]))?;
         assert!(!output.status.success(), "{failure}: {output:?}");
         assert!(
@@ -175,7 +306,7 @@ fn failed_downloads_and_checksums_preserve_the_installed_version() -> Result<(),
             fs::metadata(&executable)?.permissions().mode() & 0o777,
             0o755
         );
-        assert_eq!(fs::read_to_string(&receipt)?, "previous receipt");
+        assert_eq!(fs::read_to_string(&receipt)?, previous_receipt);
         assert_directory_entries(&directory, &[".cocoa-install.json", "cocoa"])?;
         fixture.assert_user_data_unchanged()?;
     }
@@ -629,6 +760,8 @@ impl Fixture {
             "rm",
             "awk",
             "sed",
+            "jq",
+            "wc",
             "cat",
             "cp",
             checksum_tool,
@@ -654,11 +787,14 @@ while [ "$#" -gt 0 ]; do
         --proto|--proto-redir|--tlsv1.2|--max-redirs|--connect-timeout|--max-time|--retry|--retry-max-time|--max-filesize|--write-out)
             case "$1" in --tlsv1.2) shift ;; *) shift 2 ;; esac ;;
         --output) output=$2; shift 2 ;;
-        https://github.com/ezegros/cocoa/releases/*) url=$1; shift ;;
+        https://github.com/ezegros/cocoa/releases/*|https://api.github.com/repos/ezegros/cocoa/releases\?*) url=$1; shift ;;
         *) printf 'Unexpected download argument: %s\n' "$1" >&2; exit 2 ;;
     esac
 done
 case "$url" in
+    https://api.github.com/repos/ezegros/cocoa/releases\?per_page=100\&page=*)
+        page=${url##*page=}
+        cp "$COCOA_TEST_ASSETS/page-$page.json" "$output" ;;
     https://github.com/ezegros/cocoa/releases/latest) cat "$COCOA_TEST_ASSETS/latest" ;;
     https://github.com/ezegros/cocoa/releases/download/v*)
         path=${url#https://github.com/ezegros/cocoa/releases/download/}
@@ -797,6 +933,7 @@ fn assert_receipt(
             "version": version,
             "sha256": checksum,
             "pinned_version": pinned_version,
+            "channel": "stable",
             "checked_at": 0,
         })
     );
