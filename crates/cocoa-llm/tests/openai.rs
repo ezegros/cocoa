@@ -2567,7 +2567,10 @@ async fn opencode_go_uses_its_complete_path_and_stable_application_session()
     assert_eq!(requests.len(), 2);
     for request in requests {
         assert_eq!(request.headers["x-opencode-session"], "engine-session-123");
-        assert_eq!(request.headers["user-agent"], "cocoa/0.1.0");
+        assert_eq!(
+            request.headers["user-agent"],
+            concat!("cocoa/", env!("CARGO_PKG_VERSION"))
+        );
         assert_eq!(request.headers["authorization"], "Bearer test-go-key");
     }
     Ok(())

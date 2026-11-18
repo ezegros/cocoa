@@ -417,7 +417,7 @@ checksum = "0c9ea0ac24bc397ab3c98583a3c9ba74fa56b09a4449bbe172b9b1ddb016027a"
 
 [[package]]
 name = "cocoa"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arboard",
  "async-trait",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "cocoa-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -480,7 +480,7 @@ dependencies = [
 
 [[package]]
 name = "cocoa-llm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cocoa-core",
@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "cocoa-oauth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "cocoa-quickjs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cocoa-core",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "cocoa-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "cocoa-core",
