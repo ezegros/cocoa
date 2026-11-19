@@ -627,7 +627,7 @@ fn switching_waits_for_delegated_work_without_cancelling_it() -> io::Result<()> 
     session.command("/new")?;
     session.wait_text("Got an idea?")?;
     assert!(session.contains("cocoa"));
-    assert!(session.screen().contains(['█', '▀', '▄']));
+    assert!(!session.screen().contains(['█', '▀', '▄']));
     assert!(!session.contains("Root finished while child works"));
     assert!(!session.contains("Session sess_"));
     assert_eq!(
