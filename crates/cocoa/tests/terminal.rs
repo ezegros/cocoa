@@ -1538,6 +1538,7 @@ fn commands_stay_local_and_preserve_history_model_edits_and_onboarding() -> io::
     until_result(&mut session, |_| {
         Ok(read_json(&auth_path)?.get("openrouter").is_none())
     })?;
+    wait_state(&mut session, "idle")?;
     session.command("/aliases")?;
     assert_report(&session, "blocked", Some("question"))?;
     session.key(b"\r\r\r")?;
