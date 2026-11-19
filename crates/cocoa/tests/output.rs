@@ -48,15 +48,11 @@ fn every_alias_uses_the_theme_accent_without_distinct_colors() -> Result<(), Box
                     .all(|cell| cell.fg == accent),
                 "{theme:?}: {alias} wordmark"
             );
-            let mark: Vec<_> = welcome
-                .content
-                .iter()
-                .filter(|cell| matches!(cell.symbol(), "█" | "▀" | "▄"))
-                .collect();
-            assert!(!mark.is_empty());
             assert!(
-                mark.iter().all(|cell| cell.fg == accent),
-                "{theme:?}: {alias} pod"
+                cells(&welcome, "Got an idea? Let's make something sweet.")?
+                    .iter()
+                    .all(|cell| cell.fg == theme.palette().muted),
+                "{theme:?}: {alias} tagline"
             );
             chat.initial_prompt("check")?;
             let busy = draw(&mut chat, 80, 32)?;

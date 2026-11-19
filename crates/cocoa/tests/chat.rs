@@ -142,32 +142,17 @@ fn theme_command_selects_live_and_stays_out_of_history() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn welcome_keeps_the_largest_mark_that_fits_the_draft() -> Result<(), Box<dyn Error>> {
-    for (height, draft_lines, large) in [
-        (29, 3, true),
-        (29, 4, true),
-        (28, 3, true),
-        (28, 4, false),
-        (27, 4, false),
-        (16, 3, false),
-    ] {
+fn welcome_stays_text_only_with_a_multiline_draft() -> Result<(), Box<dyn Error>> {
+    for (height, draft_lines) in [(29, 3), (28, 4), (16, 3)] {
         let mut chat = Chat::new(4096)?;
         type_text(&mut chat, &vec!["draft"; draft_lines].join("\n"));
         let view = render(&mut chat, 80, height)?;
-        let mark_columns = (0..80)
-            .filter(|column| {
-                view.lines().any(|line| {
-                    line.chars()
-                        .nth(*column)
-                        .is_some_and(|symbol| matches!(symbol, '█' | '▀' | '▄'))
-                })
-            })
-            .count();
-        assert!(mark_columns > 0, "{view}");
-        assert_eq!(mark_columns > 16, large, "{view}");
+        assert!(!view.contains(['█', '▀', '▄']), "{view}");
         assert!(view.contains("cocoa"), "{view}");
-        assert!(view.contains("Got an idea?"), "{view}");
-        assert!(view.contains("sweet."), "{view}");
+        assert!(
+            view.contains("Got an idea? Let's make something sweet."),
+            "{view}"
+        );
     }
     Ok(())
 }
@@ -175,37 +160,35 @@ fn welcome_keeps_the_largest_mark_that_fits_the_draft() -> Result<(), Box<dyn Er
 #[test]
 fn welcome_resizes_and_never_enters_the_conversation() -> Result<(), Box<dyn Error>> {
     let mut chat = Chat::new(4096)?;
-    for (width, height, symbol) in [
+    for (width, height, tagline) in [
         (80, 30, true),
+        (81, 30, true),
         (68, 30, true),
         (80, 24, true),
         (40, 18, true),
+        (39, 18, false),
         (32, 12, false),
+        (80, 7, false),
+        (80, 8, true),
         (80, 30, true),
     ] {
         let view = render(&mut chat, width, height)?;
         assert!(view.contains("cocoa"), "{view}");
-        assert_eq!(view.contains(['█', '▀', '▄']), symbol, "{view}");
-        if symbol {
-            let invitation = view
-                .lines()
-                .skip_while(|line| !line.contains("Got an idea?"))
-                .take(2)
-                .map(|line| {
-                    line.trim_matches(|character: char| {
-                        character.is_whitespace() || matches!(character, '█' | '▀' | '▄')
-                    })
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            assert_eq!(
-                invitation.trim(),
-                "Got an idea? Let's make something sweet.",
-                "{view}"
-            );
-        } else {
-            assert!(!view.contains("Got an idea?"), "{view}");
-        }
+        let name_row = view
+            .lines()
+            .find(|line| line.trim() == "cocoa")
+            .ok_or("missing welcome name")?;
+        assert_eq!(
+            name_row.find("cocoa"),
+            Some(usize::from((width - 5) / 2)),
+            "{view}"
+        );
+        assert!(!view.contains(['█', '▀', '▄']), "{view}");
+        assert_eq!(
+            view.contains("Got an idea? Let's make something sweet."),
+            tagline,
+            "{view}"
+        );
         assert_eq!(view.lines().count(), usize::from(height));
     }
     type_text(&mut chat, "hello");
