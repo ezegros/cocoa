@@ -53,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: nextest@0.9.143
       - run: ./scripts/test --profile ci
@@ -78,7 +78,7 @@ jobs:
           shared-key: registry
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-deny@0.20.2
       # Advisories run in audit.yml so a newly published advisory cannot block unrelated pull requests.
