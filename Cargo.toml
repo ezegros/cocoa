@@ -47,7 +47,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false }
 tui-markdown = { version = "0.3.13", default-features = false }
 unicode-normalization = "0.1.26"
 unicode-segmentation = "1.13.3"
-url = "2.5.8"
+url = "2.5.9"
 wiremock = "0.6.5"
 
 [workspace.package]
